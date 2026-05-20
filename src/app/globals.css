@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color-scheme: light;
+  background: #F5F0E8;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@page {
+  margin: 0.5in 0.65in;
+  size: letter;
+}
+
+@media print {
+  .no-print { display: none !important; }
+  .print-only { display: block !important; }
+
+  aside { display: none !important; }
+  main { overflow: visible !important; }
+  body { background: #fff !important; }
+
+  /* Preserve background colors in print (e.g. statement header, table rows) */
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+
+  tr { break-inside: avoid; }
+  table { page-break-inside: auto; }
+}
