@@ -52,6 +52,24 @@ export interface MerchantGroup {
   isSeparated?: boolean
 }
 
+export function suggestCatByAmount(
+  amount: number,
+  existingTxns: Array<{ amount: string | number; category: string | null }>,
+  tolerance = 0.15,
+): string {
+  if (amount === 0) return ''
+  const counts: Record<string, number> = {}
+  existingTxns.forEach(t => {
+    if (!t.category) return
+    const a = typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount))
+    if (isNaN(a) || a === 0) return
+    if (Math.abs(a - amount) / Math.abs(amount) <= tolerance) {
+      counts[t.category] = (counts[t.category] || 0) + 1
+    }
+  })
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? ''
+}
+
 export function clusterGroups(groups: MerchantGroup[], threshold = 0.45): { clusters: MerchantGroup[]; keyToCluster: Record<string, string> } {
   if (!groups.length) return { clusters: [], keyToCluster: {} }
 

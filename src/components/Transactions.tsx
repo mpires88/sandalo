@@ -2,16 +2,19 @@
 
 import { useState, useEffect, useMemo, useCallback, Fragment, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
-import { normKey, buildCatIndex, suggestCat, clusterGroups, type MerchantGroup } from '@/lib/merchantClustering'
+import { normKey, buildCatIndex, suggestCat, suggestCatByAmount, clusterGroups, type MerchantGroup } from '@/lib/merchantClustering'
 import CategoryInput from './CategoryInput'
 import { ALL_SECTIONS, PL_SECTIONS, BS_SECTIONS, DEFAULT_ACCOUNTS } from '@/lib/chartOfAccounts'
 import { seedTransactionsOnce } from '@/lib/seedTransactions'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+interface TxnSplit { account: string; amount: number }
+
 interface Txn {
   id: string; transaction_date: string; description: string
   amount: string | number; category: string | null; account: string | null
+  splits?: TxnSplit[] | null
 }
 
 function dominantCat(txns: Txn[]): string {
@@ -77,8 +80,20 @@ function parseDate(raw: string, fmt: string): string | null {
 }
 
 interface ParsedRow {
+  id?: string
   transaction_date: string; description: string; amount: number
+  source_account_id?: string
   account?: string; reference_id?: string; category?: string; client_id?: string
+}
+
+async function deterministicUUID(bankAccount: string, date: string, amount: number, description: string): Promise<string> {
+  const input = `${bankAccount}|${date}|${amount}|${description}`
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+  const b = new Uint8Array(buf).slice(0, 16)
+  b[6] = (b[6] & 0x0f) | 0x40  // version 4
+  b[8] = (b[8] & 0x3f) | 0x80  // RFC 4122 variant
+  const h = Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('')
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`
 }
 
 function fingerprint(row: ParsedRow | Txn): string {
@@ -90,25 +105,28 @@ const STANDARD_FIELDS = [
   { key: 'transaction_date', label: 'Date',         required: true  },
   { key: 'description',      label: 'Description',  required: true  },
   { key: 'amount',           label: 'Amount',        required: false },
-  { key: 'account',          label: 'Account',       required: false },
   { key: 'reference_id',     label: 'Reference ID',  required: false },
   { key: 'category',         label: 'Category',      required: false },
 ]
 
 interface CsvCfg {
-  bankName: string; dateFormat: string; splitAmounts: boolean; debitsPositive: boolean
+  sourceAccountId: string  // financial_accounts.id — required for import
+  dateFormat: string; splitAmounts: boolean; debitsPositive: boolean; indicatorCol: string
   cols: Record<string, string>
 }
 
 const DEFAULT_CFG = (): CsvCfg => ({
-  bankName: '', dateFormat: 'MM/DD/YYYY', splitAmounts: false, debitsPositive: false,
-  cols: { transaction_date: '', description: '', amount: '', credit: '', debit: '', account: '', reference_id: '', category: '' },
+  sourceAccountId: '', dateFormat: 'MM/DD/YYYY', splitAmounts: false, debitsPositive: false, indicatorCol: '',
+
+  cols: { transaction_date: '', description: '', amount: '', credit: '', debit: '', reference_id: '', category: '' },
 })
 
-const LS_KEY_BANKS = 'sandalo_csv_bank_mappings'
+const LS_KEY_BANKS     = 'sandalo_csv_bank_mappings'
+const LS_COL_WIDTHS    = 'sandalo_txn_col_widths'
+const DEFAULT_COL_WIDTHS: Record<string, number> = { transaction_date: 100, description: 260, category: 160, account: 200, amount: 110 }
 const loadAllMappings = (): Record<string, CsvCfg> => { try { return JSON.parse(localStorage.getItem(LS_KEY_BANKS) || '{}') } catch { return {} } }
-const saveBankMapping = (bank: string, cfg: CsvCfg) => {
-  const all = loadAllMappings(); all[bank] = cfg
+const saveBankMapping = (accountId: string, cfg: CsvCfg) => {
+  const all = loadAllMappings(); all[accountId] = cfg
   localStorage.setItem(LS_KEY_BANKS, JSON.stringify(all))
 }
 
@@ -116,18 +134,6 @@ const saveBankMapping = (bank: string, cfg: CsvCfg) => {
 
 const TX_PAGE_SIZE = 100
 
-const gridRow = {
-  display: 'grid' as const,
-  gridTemplateColumns: '1.5fr 1fr 240px 60px 120px 36px',
-  gap: 0,
-  padding: '9px 14px',
-  alignItems: 'center' as const,
-}
-
-const colHd = {
-  fontSize: 9.5, fontWeight: 700 as const, color: '#C8A96E',
-  textTransform: 'uppercase' as const, letterSpacing: '.06em',
-}
 
 export default function Transactions({ clientId }: { clientId: string }) {
   const [txns,          setTxns]          = useState<Txn[]>([])
@@ -138,8 +144,7 @@ export default function Transactions({ clientId }: { clientId: string }) {
   const [catSectionMap, setCatSectionMap] = useState<Record<string, string>>({})
   const [accountMap,    setAccountMap]    = useState<Record<string, string>>({})
   const [saved,         setSaved]         = useState(new Set<string>())
-  const [applying,      setApplying]      = useState(new Set<string>())
-  const [expanded,      setExpanded]      = useState<Record<string, boolean>>({})
+const [expanded,      setExpanded]      = useState<Record<string, boolean>>({})
   const [saving,        setSaving]        = useState(false)
   const [showImport,    setShowImport]    = useState(false)
   const [createModal,   setCreateModal]   = useState<{ categoryKey: string; accountName: string; txnIds?: string[] } | null>(null)
@@ -148,19 +153,9 @@ export default function Transactions({ clientId }: { clientId: string }) {
   const [newAccParent,  setNewAccParent]  = useState('')
   const [savingNewAcc,  setSavingNewAcc]  = useState(false)
 
-  const [expandFilters,   setExpandFilters]   = useState<Record<string, string>>({})
-  const [expandSelected,  setExpandSelected]  = useState<Record<string, Set<string>>>({})
-  const [expandMoveTo,    setExpandMoveTo]    = useState<Record<string, string>>({})
-  const [expandExtractTo, setExpandExtractTo] = useState<Record<string, string>>({})
-  const [movingGroup,     setMovingGroup]     = useState<string | null>(null)
-  const [splitMode,      setSplitMode]      = useState<string | null>(null)
-  const [splitConfig,    setSplitConfig]    = useState<Record<string, { checked: boolean; newCat: string }>>({})
-  const [applyingSplit,  setApplyingSplit]  = useState(false)
-  const [txnFilter,      setTxnFilter]      = useState<'all' | 'mapped' | 'unmapped' | 'uncategorized'>('all')
+  const [txnFilter,      setTxnFilter]      = useState<'all' | 'mapped' | 'unmapped'>('all')
   const [txDateFrom,     setTxDateFrom]     = useState('')
   const [txDateTo,       setTxDateTo]       = useState('')
-  const [view,           setView]           = useState<'groups' | 'transactions'>('groups')
-  const [groupMode,      setGroupMode]      = useState<'category' | 'desc_amount'>('category')
   const [txSearch,       setTxSearch]       = useState('')
   const [txSortCol,      setTxSortCol]      = useState<'transaction_date' | 'description' | 'category' | 'account' | 'amount'>('transaction_date')
   const [txSortDir,      setTxSortDir]      = useState<'asc' | 'desc'>('desc')
@@ -171,13 +166,21 @@ export default function Transactions({ clientId }: { clientId: string }) {
   const [txEditVal,      setTxEditVal]      = useState('')
   const [txBulkAccount,  setTxBulkAccount]  = useState('')
   const [txBulkAssigning,setTxBulkAssigning]= useState(false)
+  const [splitModal,     setSplitModal]     = useState<Txn | null>(null)
+  const [splitLines,     setSplitLines]     = useState<Array<{ account: string; amount: string }>>([])
+  const [savingSplit,    setSavingSplit]    = useState(false)
+  const [colWidths,      setColWidths]      = useState<Record<string, number>>(() => {
+    try { return { ...DEFAULT_COL_WIDTHS, ...JSON.parse(localStorage.getItem(LS_COL_WIDTHS) || '{}') } }
+    catch { return { ...DEFAULT_COL_WIDTHS } }
+  })
+  const resizingRef = useRef<{ col: string; startX: number; startW: number } | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true); setLoadError(null)
     try {
       await seedTransactionsOnce(clientId)
       const [txnRes, catRes] = await Promise.all([
-        supabase.from('bank_transactions').select('id, transaction_date, description, amount, category, account').eq('client_id', clientId).range(0, 999),
+        supabase.from('bank_transactions').select('id, transaction_date, description, amount, category, account, splits').eq('client_id', clientId).range(0, 999),
         supabase.from('categories').select('name, sort_order, pl_section, parent').eq('client_id', clientId).order('sort_order'),
       ])
       if (txnRes.error) throw txnRes.error
@@ -209,7 +212,7 @@ export default function Transactions({ clientId }: { clientId: string }) {
         setLoadingMore(true)
         let offset = 1000
         while (true) {
-          const res = await supabase.from('bank_transactions').select('id, transaction_date, description, amount, category, account').eq('client_id', clientId).range(offset, offset + 999)
+          const res = await supabase.from('bank_transactions').select('id, transaction_date, description, amount, category, account, splits').eq('client_id', clientId).range(offset, offset + 999)
           if (res.error || !res.data?.length) break
           all = [...all, ...res.data]
           setTxns(all)
@@ -247,43 +250,21 @@ export default function Transactions({ clientId }: { clientId: string }) {
 
   useEffect(() => { load() }, [load])
 
-  const categoryGroups = useMemo(() => {
-    const byCategory: Record<string, { count: number; total: number; txns: Txn[]; merchants: Record<string, number> }> = {}
-    txns.forEach(t => {
-      const cat = (t.category as string) || '(uncategorized)'
-      if (!byCategory[cat]) byCategory[cat] = { count: 0, total: 0, txns: [], merchants: {} }
-      byCategory[cat].count++
-      byCategory[cat].total += Number(t.amount) || 0
-      byCategory[cat].txns.push(t)
-      const desc = (t.description || '').trim()
-      if (desc) byCategory[cat].merchants[desc] = (byCategory[cat].merchants[desc] || 0) + 1
-    })
-    return Object.entries(byCategory)
-      .map(([category, { count, total, txns: grpTxns, merchants }]) => {
-        const topMerchants = Object.entries(merchants).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name]) => name)
-        return { category, count, total, txns: grpTxns, topMerchants }
-      })
-      .sort((a, b) => a.category.localeCompare(b.category))
-  }, [txns])
-
-  const descAmountGroups = useMemo(() => {
-    const SEP = '|||'
-    const byKey: Record<string, { count: number; total: number; txns: Txn[]; merchants: Record<string, number> }> = {}
-    txns.forEach(t => {
-      const key = `${(t.description || '').trim()}${SEP}${Number(t.amount).toFixed(2)}`
-      if (!byKey[key]) byKey[key] = { count: 0, total: 0, txns: [], merchants: {} }
-      byKey[key].count++
-      byKey[key].total += Number(t.amount) || 0
-      const desc = (t.description || '').trim()
-      if (desc) byKey[key].merchants[desc] = (byKey[key].merchants[desc] || 0) + 1
-    })
-    return Object.entries(byKey)
-      .map(([key, { count, total, txns: grpTxns, merchants }]) => {
-        const topMerchants = Object.entries(merchants).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([name]) => name)
-        return { category: key, count, total, txns: grpTxns, topMerchants }
-      })
-      .sort((a, b) => a.category.split('|||')[0].localeCompare(b.category.split('|||')[0]))
-  }, [txns])
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!resizingRef.current) return
+      const { col, startX, startW } = resizingRef.current
+      setColWidths(prev => ({ ...prev, [col]: Math.max(60, startW + e.clientX - startX) }))
+    }
+    const onUp = () => {
+      if (!resizingRef.current) return
+      resizingRef.current = null
+      setColWidths(prev => { localStorage.setItem(LS_COL_WIDTHS, JSON.stringify(prev)); return prev })
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
+  }, [])
 
   const accountGroups = useMemo(() => {
     const bySection: Record<string, string[]> = {}
@@ -296,42 +277,12 @@ export default function Transactions({ clientId }: { clientId: string }) {
     return ordered.length ? ordered : undefined
   }, [allCats, catSectionMap])
 
-  const coverage = useMemo(() => {
-    if (!txns.length) return null
-    const assetSections = new Set(['Current Assets', 'Non-Current Assets'])
-    const map: Record<string, Record<string, number>> = {}
-    txns.forEach(t => {
-      const acct = t.account
-      if (!acct || !assetSections.has(catSectionMap[acct] ?? '')) return
-      const ym = (t.transaction_date || '').slice(0, 7)
-      if (!ym) return
-      if (!map[acct]) map[acct] = {}
-      map[acct][ym] = (map[acct][ym] || 0) + 1
-    })
-    if (!Object.keys(map).length) return null
-    const months = [...new Set(txns.map(t => (t.transaction_date || '').slice(0, 7)).filter(Boolean))].sort()
-    return { accounts: Object.keys(map).sort(), months, map }
-  }, [txns, catSectionMap])
-
-  const visibleGroups = useMemo(() => {
-    const groups = groupMode === 'desc_amount' ? descAmountGroups : categoryGroups
-    switch (txnFilter) {
-      case 'mapped':        return groups.filter(g => saved.has(g.category))
-      case 'unmapped':      return groups.filter(g => !saved.has(g.category))
-      case 'uncategorized': return groupMode === 'category'
-        ? groups.filter(g => g.category === '(uncategorized)')
-        : groups
-      default:              return groups
-    }
-  }, [categoryGroups, descAmountGroups, groupMode, txnFilter, saved])
-
   const filteredTxns = useMemo(() => {
     let list = [...txns]
     // Status filter
     switch (txnFilter) {
-      case 'mapped':        list = list.filter(t => !!t.account); break
-      case 'unmapped':      list = list.filter(t => !t.account); break
-      case 'uncategorized': list = list.filter(t => !t.category); break
+      case 'mapped':   list = list.filter(t => !!t.account || (t.splits?.length ?? 0) > 0); break
+      case 'unmapped': list = list.filter(t => !t.account && !(t.splits?.length ?? 0)); break
     }
     // Date range
     if (txDateFrom) list = list.filter(t => t.transaction_date >= txDateFrom)
@@ -342,17 +293,18 @@ export default function Transactions({ clientId }: { clientId: string }) {
       list = list.filter(t =>
         (t.description || '').toLowerCase().includes(q) ||
         (t.category    || '').toLowerCase().includes(q) ||
-        (t.account     || '').toLowerCase().includes(q)
+        (t.account     || '').toLowerCase().includes(q) ||
+        (t.splits ?? []).some(s => s.account.toLowerCase().includes(q))
       )
     }
     list.sort((a, b) => {
       let av: string | number, bv: string | number
       switch (txSortCol) {
-        case 'transaction_date': av = a.transaction_date || '';                     bv = b.transaction_date || '';                     break
-        case 'description':      av = (a.description || '').toLowerCase();          bv = (b.description || '').toLowerCase();          break
-        case 'category':         av = (a.category    || '').toLowerCase();          bv = (b.category    || '').toLowerCase();          break
-        case 'account':          av = (a.account     || '').toLowerCase();          bv = (b.account     || '').toLowerCase();          break
-        case 'amount':           av = Number(a.amount);                             bv = Number(b.amount);                             break
+        case 'transaction_date': av = a.transaction_date || '';            bv = b.transaction_date || '';            break
+        case 'description':      av = (a.description || '').toLowerCase(); bv = (b.description || '').toLowerCase(); break
+        case 'category':         av = (a.category    || '').toLowerCase(); bv = (b.category    || '').toLowerCase(); break
+        case 'account':          av = (a.account     || '').toLowerCase(); bv = (b.account     || '').toLowerCase(); break
+        case 'amount':           av = Number(a.amount);                    bv = Number(b.amount);                    break
         default:                 av = ''; bv = ''
       }
       if (av < bv) return txSortDir === 'asc' ? -1 : 1
@@ -361,50 +313,6 @@ export default function Transactions({ clientId }: { clientId: string }) {
     })
     return list
   }, [txns, txSearch, txSortCol, txSortDir, txnFilter, txDateFrom, txDateTo])
-
-  const applyMapping = async (category: string, accountName: string) => {
-    const name = accountName.trim()
-    if (!name) return
-    if (!allCats.includes(name)) {
-      setCreateModal({ categoryKey: category, accountName: name })
-      setNewAccName(name); setNewAccSection('Operating Expenses'); setNewAccParent('')
-      return
-    }
-    setApplying(prev => new Set([...prev, category]))
-    try {
-      let q = supabase.from('bank_transactions').update({ account: name }).eq('client_id', clientId)
-      if (groupMode === 'desc_amount') {
-        const [desc, amtStr] = category.split('|||')
-        q = q.eq('description', desc).eq('amount', amtStr)
-      } else {
-        const isUncategorized = category === '(uncategorized)'
-        q = isUncategorized ? q.eq('category', null as unknown as string) : q.eq('category', category)
-      }
-      const { error } = await q
-      if (error) throw error
-      setSaved(prev => new Set([...prev, category]))
-      if (groupMode === 'desc_amount') {
-        const [desc, amtStr] = category.split('|||')
-        setTxns(prev => prev.map(t =>
-          (t.description || '').trim() === desc && Number(t.amount).toFixed(2) === amtStr
-            ? { ...t, account: name } : t
-        ))
-      } else {
-        setTxns(prev => prev.map(t => ((t.category as string) || '(uncategorized)') === category ? { ...t, account: name } : t))
-      }
-    } catch (e: unknown) { alert('Failed: ' + (e as Error).message) }
-    finally { setApplying(prev => { const s = new Set(prev); s.delete(category); return s }) }
-  }
-
-  const applyAll = async () => {
-    setSaving(true)
-    for (const [category, account] of Object.entries(accountMap)) {
-      if (!saved.has(category) && allCats.includes(account.trim())) {
-        await applyMapping(category, account)
-      }
-    }
-    setSaving(false)
-  }
 
   const createAndApplyAccount = async () => {
     if (!createModal) return
@@ -437,106 +345,6 @@ export default function Transactions({ clientId }: { clientId: string }) {
       setCreateModal(null)
     } catch (e: unknown) { alert('Failed: ' + (e as Error).message) }
     finally { setSavingNewAcc(false) }
-  }
-
-  const enterSplitMode = (category: string) => {
-    const grp = categoryGroups.find(g => g.category === category)
-    if (!grp) return
-    const merchantCounts: Record<string, number> = {}
-    grp.txns.forEach(t => {
-      const desc = (t.description || '').trim()
-      if (desc) merchantCounts[desc] = (merchantCounts[desc] || 0) + 1
-    })
-    const config: Record<string, { checked: boolean; newCat: string }> = {}
-    Object.keys(merchantCounts)
-      .sort((a, b) => merchantCounts[b] - merchantCounts[a])
-      .forEach(desc => { config[desc] = { checked: false, newCat: desc } })
-    setSplitConfig(config)
-    setSplitMode(category)
-  }
-
-  const doSplit = async (category: string) => {
-    const grp = categoryGroups.find(g => g.category === category)
-    if (!grp) return
-    const toSplit = Object.entries(splitConfig).filter(([, v]) => v.checked && v.newCat.trim() && v.newCat.trim() !== category)
-    if (!toSplit.length) return
-    setApplyingSplit(true)
-    try {
-      for (const [merchant, { newCat }] of toSplit) {
-        const ids = grp.txns.filter(t => (t.description || '').trim() === merchant).map(t => t.id)
-        for (let i = 0; i < ids.length; i += 500) {
-          const { error } = await supabase.from('bank_transactions').update({ category: newCat.trim() }).in('id', ids.slice(i, i + 500))
-          if (error) throw error
-        }
-      }
-      const updates: Record<string, string> = {}
-      toSplit.forEach(([merchant, { newCat }]) => { updates[merchant] = newCat.trim() })
-      setTxns(prev => prev.map(t => {
-        const newCat = updates[(t.description || '').trim()]
-        return newCat ? { ...t, category: newCat } : t
-      }))
-      setSplitMode(null)
-    } catch (e: unknown) { alert('Split failed: ' + (e as Error).message) }
-    finally { setApplyingSplit(false) }
-  }
-
-  const moveSelected = async (category: string) => {
-    const target = (expandMoveTo[category] || '').trim()
-    if (!target) return
-    const ids = [...(expandSelected[category] ?? new Set())]
-    if (!ids.length) return
-    if (!allCats.includes(target)) {
-      setCreateModal({ categoryKey: category, accountName: target, txnIds: ids })
-      setNewAccName(target); setNewAccSection('Operating Expenses'); setNewAccParent('')
-      return
-    }
-    setMovingGroup(category)
-    try {
-      for (let i = 0; i < ids.length; i += 500) {
-        const { error } = await supabase.from('bank_transactions').update({ account: target }).in('id', ids.slice(i, i + 500))
-        if (error) throw error
-      }
-      setTxns(prev => prev.map(t => ids.includes(t.id) ? { ...t, account: target } : t))
-      setExpandSelected(prev => ({ ...prev, [category]: new Set() }))
-      setExpandMoveTo(prev => ({ ...prev, [category]: '' }))
-    } catch (e: unknown) { alert('Move failed: ' + (e as Error).message) }
-    finally { setMovingGroup(null) }
-  }
-
-  const extractSelected = async (category: string) => {
-    const newCat = (expandExtractTo[category] || '').trim()
-    if (!newCat || newCat === category) return
-    const ids = [...(expandSelected[category] ?? new Set())]
-    if (!ids.length) return
-    setMovingGroup(category)
-    try {
-      for (let i = 0; i < ids.length; i += 500) {
-        const { error } = await supabase.from('bank_transactions').update({ category: newCat }).in('id', ids.slice(i, i + 500))
-        if (error) throw error
-      }
-      setTxns(prev => prev.map(t => ids.includes(t.id) ? { ...t, category: newCat } : t))
-      setExpandSelected(prev => ({ ...prev, [category]: new Set() }))
-      setExpandExtractTo(prev => ({ ...prev, [category]: '' }))
-    } catch (e: unknown) { alert('Extract failed: ' + (e as Error).message) }
-    finally { setMovingGroup(null) }
-  }
-
-  const ungroupSelected = async (groupKey: string) => {
-    const ids = [...(expandSelected[groupKey] ?? new Set())]
-    if (!ids.length) return
-    setMovingGroup(groupKey)
-    try {
-      for (let i = 0; i < ids.length; i += 500) {
-        const { error } = await supabase
-          .from('bank_transactions')
-          .update({ category: null })
-          .in('id', ids.slice(i, i + 500))
-        if (error) throw error
-      }
-      setTxns(prev => prev.map(t => ids.includes(t.id) ? { ...t, category: null } : t))
-      setExpandSelected(prev => ({ ...prev, [groupKey]: new Set() }))
-    } catch (e: unknown) { alert('Ungroup failed: ' + (e as Error).message) }
-    finally { setMovingGroup(null) }
   }
 
   const bulkAssignAccount = async (name: string) => {
@@ -585,6 +393,40 @@ export default function Transactions({ clientId }: { clientId: string }) {
     finally { setDeletingTxns(false) }
   }
 
+  const openSplitModal = (t: Txn) => {
+    setSplitLines(
+      t.splits?.length
+        ? t.splits.map(s => ({ account: s.account, amount: String(s.amount) }))
+        : [{ account: t.account || '', amount: '' }, { account: '', amount: '' }]
+    )
+    setSplitModal(t)
+  }
+
+  const saveSplits = async () => {
+    if (!splitModal) return
+    const lines = splitLines
+      .map(l => ({ account: l.account.trim(), amount: parseFloat(l.amount) }))
+      .filter(l => l.account && !isNaN(l.amount))
+    if (lines.length < 2) { alert('Need at least 2 split lines with accounts and amounts'); return }
+    setSavingSplit(true)
+    try {
+      const { error } = await supabase.from('bank_transactions').update({ splits: lines, account: null }).eq('id', splitModal.id)
+      if (error) throw error
+      setTxns(prev => prev.map(t => t.id === splitModal.id ? { ...t, splits: lines, account: null } : t))
+      setSplitModal(null)
+    } catch (e: unknown) { alert('Save failed: ' + (e as Error).message) }
+    finally { setSavingSplit(false) }
+  }
+
+  const clearSplitsOnTxn = async (id: string) => {
+    try {
+      const { error } = await supabase.from('bank_transactions').update({ splits: null }).eq('id', id)
+      if (error) throw error
+      setTxns(prev => prev.map(t => t.id === id ? { ...t, splits: null } : t))
+      setSplitModal(null)
+    } catch (e: unknown) { alert('Failed: ' + (e as Error).message) }
+  }
+
   const deleteAll = async () => {
     if (!confirm(`Permanently delete ALL ${txns.length} transactions? This cannot be undone.`)) return
     const typed = window.prompt('Type DELETE to confirm:')
@@ -609,9 +451,6 @@ export default function Transactions({ clientId }: { clientId: string }) {
     <div style={s.wrap}><div style={{ padding: 28 }}><div style={s.errorBox}>Failed to load: {loadError}</div></div></div>
   )
 
-  const unmappedCount = categoryGroups.filter(g => !saved.has(g.category)).length
-  const pendingApply  = Object.entries(accountMap).filter(([c, v]) => !saved.has(c) && v.trim() && allCats.includes(v.trim())).length
-
   const txTotalPages  = Math.max(1, Math.ceil(filteredTxns.length / TX_PAGE_SIZE))
   const txPagedTxns   = filteredTxns.slice((txPage - 1) * TX_PAGE_SIZE, txPage * TX_PAGE_SIZE)
   const txAllPageSel  = txPagedTxns.length > 0 && txPagedTxns.every(t => txSelected.has(t.id))
@@ -635,370 +474,24 @@ export default function Transactions({ clientId }: { clientId: string }) {
         <div>
           <h2 style={s.h2}>Transactions</h2>
           <p style={s.sub}>
-            {categoryGroups.length} categories · {txns.length} transactions
+            {txns.length} transactions
             {loadingMore && <> · <span style={{ color: T.charcoal, opacity: .6 }}>loading more…</span></>}
-            {unmappedCount > 0 && <> · <span style={{ color: T.amber, fontWeight: 500 }}>{unmappedCount} unmapped</span></>}
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {pendingApply > 0 && (
-            <button style={{ ...s.btnPrimary, opacity: saving ? 0.6 : 1 }} onClick={applyAll} disabled={saving}>
-              {saving ? 'Applying…' : `Apply All (${pendingApply})`}
-            </button>
-          )}
           {txns.length > 0 && <button style={s.btnDanger} disabled={saving} onClick={deleteAll}>Delete All</button>}
           <button style={s.btnSecondary} onClick={() => setShowImport(true)}>↑ Import CSV</button>
         </div>
       </header>
 
       <div style={s.content}>
-        {/* View toggle */}
-        <div style={{ display: 'flex', gap: 4, marginBottom: view === 'groups' ? 8 : 16 }}>
-          <button style={{ ...s.tab, ...(view === 'groups' ? s.tabActive : {}) }} onClick={() => setView('groups')}>Grouped View</button>
-          <button style={{ ...s.tab, ...(view === 'transactions' ? s.tabActive : {}) }} onClick={() => setView('transactions')}>All Transactions</button>
-        </div>
-        {view === 'groups' && (
-          <div style={{ display: 'flex', gap: 4, marginBottom: 16, alignItems: 'center' }}>
-            <span style={{ fontSize: 11, color: T.charcoal, opacity: 0.55, marginRight: 2 }}>Group by:</span>
-            <button style={{ ...s.tab, ...(groupMode === 'category' ? s.tabActive : {}) }} onClick={() => setGroupMode('category')}>Category (Column Z)</button>
-            <button style={{ ...s.tab, ...(groupMode === 'desc_amount' ? s.tabActive : {}) }} onClick={() => setGroupMode('desc_amount')}>Description + Amount</button>
-          </div>
-        )}
-
-        {view === 'groups' && (<>
-        {coverage && <CoveragePanel coverage={coverage} />}
-
-        {/* Filter tabs */}
-        <div style={{ display: 'flex', gap: 4, marginBottom: 10, flexWrap: 'wrap' as const }}>
-          {([
-            { key: 'all',           label: 'All',           count: categoryGroups.length },
-            { key: 'unmapped',      label: 'Unmapped',      count: categoryGroups.filter(g => !saved.has(g.category)).length },
-            { key: 'mapped',        label: 'Mapped',        count: categoryGroups.filter(g => saved.has(g.category)).length },
-            { key: 'uncategorized', label: 'Uncategorized', count: categoryGroups.filter(g => g.category === '(uncategorized)').length },
-          ] as const).map(f => (
-            <button
-              key={f.key}
-              style={{ ...s.tab, ...(txnFilter === f.key ? s.tabActive : {}), display: 'flex', gap: 5, alignItems: 'center' as const }}
-              onClick={() => setTxnFilter(f.key)}
-            >
-              {f.label}
-              <span style={{
-                fontSize: 9.5, fontWeight: 600,
-                background: txnFilter === f.key ? 'rgba(255,255,255,0.25)' : T.page,
-                color: txnFilter === f.key ? '#fff' : '#9ca3af',
-                borderRadius: 9, padding: '1px 6px', lineHeight: 1.5,
-              }}>
-                {f.count}
-              </span>
-            </button>
-          ))}
-        </div>
-
-        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 8, overflow: 'hidden' }}>
-          {/* Column headers */}
-          <div style={{ ...gridRow, background: '#f9faf8', borderBottom: `2px solid ${T.border}` }}>
-            <div style={colHd}>Merchant / Description</div>
-            <div style={colHd}>{groupMode === 'desc_amount' ? 'Amount' : 'Bank Category'}</div>
-            <div style={colHd}>Account Category</div>
-            <div style={{ ...colHd, textAlign: 'right' }}>Txns</div>
-            <div style={{ ...colHd, textAlign: 'right' }}>Total</div>
-            <div />
-          </div>
-
-          {visibleGroups.map(g => {
-            const isSaved    = saved.has(g.category)
-            const isApplying = applying.has(g.category)
-            const pending    = accountMap[g.category] ?? ''
-            const isExp      = !!expanded[g.category]
-
-            return (
-              <Fragment key={g.category}>
-                <div style={{ ...gridRow, background: isSaved ? 'rgba(44,95,82,0.04)' : 'transparent', borderBottom: `1px solid ${T.border}` }}>
-
-                  {/* Merchant / Description */}
-                  <div style={{ fontSize: 12, color: '#6b7280', lineHeight: 1.5, overflow: 'hidden' }}>
-                    {g.topMerchants.slice(0, 2).map((merch, i) => (
-                      <div key={i} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{merch}</div>
-                    ))}
-                    {g.topMerchants.length === 0 && <span style={{ color: '#c0bdb7' }}>—</span>}
-                    {g.count > 2 && (
-                      <div style={{ color: '#9ca3af', fontSize: 11 }}>
-                        +{g.count - Math.min(2, g.topMerchants.length)} more
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Bank Category (Column Z) or per-transaction Amount */}
-                  {groupMode === 'desc_amount' ? (
-                    <div style={{ fontSize: 13, fontWeight: 500, color: Number(g.category.split('|||')[1]) < 0 ? '#dc2626' : '#16a34a' }}>
-                      {Number(g.category.split('|||')[1]) < 0 ? '−' : '+'}
-                      ${Math.abs(Number(g.category.split('|||')[1])).toFixed(2)}
-                    </div>
-                  ) : (
-                    <div style={{ fontSize: 13, fontWeight: 500, color: T.charcoal }}>{g.category}</div>
-                  )}
-
-                  {/* Account Category */}
-                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <CategoryInput
-                        value={pending}
-                        onChange={v => {
-                          setAccountMap(prev => ({ ...prev, [g.category]: v }))
-                          if (isSaved) setSaved(prev => { const s = new Set(prev); s.delete(g.category); return s })
-                        }}
-                        groups={accountGroups}
-                        placeholder="Select account…"
-                        onCreate={name => {
-                          setCreateModal({ categoryKey: g.category, accountName: name })
-                          setNewAccName(name); setNewAccSection('Operating Expenses'); setNewAccParent('')
-                        }}
-                      />
-                    </div>
-                    {isSaved ? (
-                      <span style={{ fontSize: 12, color: T.sage, fontWeight: 600, flexShrink: 0 }}>✓</span>
-                    ) : (
-                      <button
-                        onClick={() => applyMapping(g.category, pending)}
-                        disabled={!pending.trim() || isApplying}
-                        style={{ ...s.btnPrimary, padding: '4px 8px', fontSize: 11, flexShrink: 0, opacity: (!pending.trim() || isApplying) ? 0.4 : 1 }}
-                      >
-                        {isApplying ? '…' : 'Apply'}
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Txns */}
-                  <div style={{ textAlign: 'right', fontSize: 13, color: '#6b7280' }}>{g.count}</div>
-
-                  {/* Total */}
-                  <div style={{ textAlign: 'right', fontSize: 13, fontWeight: 500, color: g.total < 0 ? '#dc2626' : '#16a34a', fontVariantNumeric: 'tabular-nums' }}>
-                    {g.total < 0 ? '−' : '+'}${Math.abs(g.total).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </div>
-
-                  {/* Expand */}
-                  <div style={{ textAlign: 'center' }}>
-                    <button style={s.expandBtn} onClick={() => setExpanded(p => ({ ...p, [g.category]: !p[g.category] }))}>
-                      {isExp ? '▲' : '▼'}
-                    </button>
-                  </div>
-                </div>
-
-                {isExp && (
-                  <div style={{ background: '#E8F0EE', borderBottom: `2px solid #B8D4CC` }}>
-                    {splitMode === g.category ? (
-                      /* ── Split by merchant mode ── */
-                      <div style={{ padding: '10px 14px 14px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                          <span style={{ fontSize: 12, fontWeight: 600, color: T.charcoal, flex: 1 }}>
-                            Check the merchants you want to split into their own category
-                          </span>
-                          <button style={{ ...s.btnSecondary, fontSize: 11, padding: '4px 10px' }} onClick={() => setSplitMode(null)}>Cancel</button>
-                          <button
-                            style={{ ...s.btnPrimary, fontSize: 11, padding: '4px 10px', opacity: applyingSplit ? 0.6 : 1 }}
-                            disabled={applyingSplit || !Object.values(splitConfig).some(v => v.checked && v.newCat.trim())}
-                            onClick={() => doSplit(g.category)}
-                          >
-                            {applyingSplit ? 'Splitting…' : 'Apply Split'}
-                          </button>
-                        </div>
-                        {Object.entries(splitConfig).map(([merchant, { checked, newCat }]) => {
-                          const count = g.txns.filter(t => (t.description || '').trim() === merchant).length
-                          return (
-                            <div key={merchant} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 2px', borderBottom: `1px solid rgba(0,0,0,0.06)` }}>
-                              <input type="checkbox" checked={checked}
-                                onChange={e => setSplitConfig(prev => ({ ...prev, [merchant]: { ...prev[merchant], checked: e.target.checked } }))} />
-                              <span style={{ fontSize: 12, color: T.charcoal, flex: '0 1 260px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{merchant}</span>
-                              <span style={{ fontSize: 11, color: '#9ca3af', flexShrink: 0 }}>({count} txn{count !== 1 ? 's' : ''})</span>
-                              {checked && (
-                                <>
-                                  <span style={{ fontSize: 11, color: '#9ca3af', flexShrink: 0 }}>→</span>
-                                  <input
-                                    style={{ flex: 1, padding: '4px 8px', border: `1px solid ${T.border}`, borderRadius: 4, fontSize: 12, color: T.charcoal, background: '#fff' }}
-                                    value={newCat}
-                                    onChange={e => setSplitConfig(prev => ({ ...prev, [merchant]: { ...prev[merchant], newCat: e.target.value } }))}
-                                    placeholder="New category name…"
-                                  />
-                                </>
-                              )}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    ) : (
-                      /* ── Normal expanded view ── */
-                      <div style={{ padding: '10px 14px 12px' }}>
-                        {/* Toolbar */}
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                          <input
-                            style={{ ...s.input, flex: 1, fontSize: 12 }}
-                            placeholder="Filter transactions…"
-                            value={expandFilters[g.category] || ''}
-                            onChange={e => {
-                              setExpandFilters(prev => ({ ...prev, [g.category]: e.target.value }))
-                              setExpandSelected(prev => ({ ...prev, [g.category]: new Set() }))
-                            }}
-                          />
-                          {groupMode === 'category' && (
-                            <button
-                              style={{ ...s.btnSecondary, fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
-                              onClick={() => enterSplitMode(g.category)}
-                            >
-                              Split by merchant
-                            </button>
-                          )}
-                        </div>
-
-                        {/* Bulk action bar */}
-                        {(expandSelected[g.category]?.size ?? 0) > 0 && (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8, padding: '8px 10px', background: '#D0E4DE', borderRadius: 5 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                              <span style={{ fontSize: 12, fontWeight: 600, color: T.charcoal }}>
-                                {expandSelected[g.category]!.size} selected
-                              </span>
-                              <button
-                                style={{ ...s.btnSecondary, fontSize: 11, padding: '2px 8px' }}
-                                onClick={() => setExpandSelected(prev => ({ ...prev, [g.category]: new Set() }))}
-                              >
-                                Clear
-                              </button>
-                            </div>
-
-                            {/* Assign account */}
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                              <span style={{ fontSize: 11, color: T.charcoal, flexShrink: 0, width: 110 }}>Assign account:</span>
-                              <div style={{ flex: 1 }}>
-                                <CategoryInput
-                                  value={expandMoveTo[g.category] || ''}
-                                  onChange={v => setExpandMoveTo(prev => ({ ...prev, [g.category]: v }))}
-                                  groups={accountGroups}
-                                  placeholder="Select or create account…"
-                                  onCreate={name => {
-                                    const ids = [...(expandSelected[g.category] ?? new Set())]
-                                    setCreateModal({ categoryKey: g.category, accountName: name, txnIds: ids })
-                                    setNewAccName(name); setNewAccSection('Operating Expenses'); setNewAccParent('')
-                                  }}
-                                />
-                              </div>
-                              <button
-                                style={{ ...s.btnPrimary, fontSize: 11, padding: '4px 10px', flexShrink: 0, opacity: movingGroup === g.category ? 0.6 : 1 }}
-                                disabled={movingGroup === g.category || !(expandMoveTo[g.category] || '').trim()}
-                                onClick={() => moveSelected(g.category)}
-                              >
-                                {movingGroup === g.category ? '…' : 'Assign'}
-                              </button>
-                            </div>
-
-                            {/* Extract to new group */}
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingTop: 4, borderTop: '1px solid rgba(44,95,82,0.15)' }}>
-                              <span style={{ fontSize: 11, color: T.charcoal, flexShrink: 0, width: 110 }}>Extract to group:</span>
-                              <input
-                                style={{ ...s.input, flex: 1, fontSize: 12 }}
-                                value={expandExtractTo[g.category] || ''}
-                                onChange={e => setExpandExtractTo(prev => ({ ...prev, [g.category]: e.target.value }))}
-                                placeholder="New or existing category name…"
-                              />
-                              <button
-                                style={{ ...s.btnSecondary, fontSize: 11, padding: '4px 10px', flexShrink: 0, opacity: movingGroup === g.category ? 0.6 : 1 }}
-                                disabled={movingGroup === g.category || !(expandExtractTo[g.category] || '').trim() || (expandExtractTo[g.category] || '').trim() === g.category}
-                                onClick={() => extractSelected(g.category)}
-                              >
-                                {movingGroup === g.category ? '…' : 'Extract'}
-                              </button>
-                            </div>
-                            {/* Ungroup — clear category without requiring a destination */}
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingTop: 4, borderTop: '1px solid rgba(44,95,82,0.15)' }}>
-                              <span style={{ fontSize: 11, color: T.charcoal, flexShrink: 0, width: 110 }}>Ungroup:</span>
-                              <span style={{ fontSize: 11, color: '#6b7280', flex: 1 }}>
-                                Clears bank category — moves to (uncategorized)
-                              </span>
-                              <button
-                                style={{ ...s.btnDanger, fontSize: 11, padding: '4px 10px', flexShrink: 0, opacity: movingGroup === g.category ? 0.6 : 1 }}
-                                disabled={movingGroup === g.category}
-                                onClick={() => ungroupSelected(g.category)}
-                              >
-                                {movingGroup === g.category ? '…' : 'Ungroup'}
-                              </button>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Transaction table */}
-                        {(() => {
-                          const filter = (expandFilters[g.category] || '').toLowerCase()
-                          const visible = filter ? g.txns.filter(t => (t.description || '').toLowerCase().includes(filter)) : g.txns
-                          const sel = expandSelected[g.category] ?? new Set<string>()
-                          const allSel = visible.length > 0 && visible.every(t => sel.has(t.id))
-
-                          const toggleTxn = (id: string) => setExpandSelected(prev => {
-                            const next = new Set(prev[g.category] ?? [])
-                            next.has(id) ? next.delete(id) : next.add(id)
-                            return { ...prev, [g.category]: next }
-                          })
-                          const toggleAll = () => setExpandSelected(prev => {
-                            const next = new Set(prev[g.category] ?? [])
-                            if (allSel) visible.forEach(t => next.delete(t.id))
-                            else visible.forEach(t => next.add(t.id))
-                            return { ...prev, [g.category]: next }
-                          })
-
-                          return (
-                            <table style={s.table}>
-                              <thead>
-                                <tr>
-                                  <th style={{ ...s.th, background: '#D0E4DE', padding: '5px 8px', width: 28 }}>
-                                    <input type="checkbox" checked={allSel} onChange={toggleAll} />
-                                  </th>
-                                  {['Date', 'Description', 'Column Z', 'Amount', 'Account'].map(h => (
-                                    <th key={h} style={{ ...s.th, background: '#D0E4DE', padding: '5px 8px' }}>{h}</th>
-                                  ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {visible.slice(0, 100).map(t => (
-                                  <tr key={t.id}
-                                    style={{ background: sel.has(t.id) ? '#dceee8' : '#fff', cursor: 'pointer' }}
-                                    onClick={() => toggleTxn(t.id)}
-                                  >
-                                    <td style={{ ...s.td, padding: '4px 8px' }} onClick={e => e.stopPropagation()}>
-                                      <input type="checkbox" checked={sel.has(t.id)} onChange={() => toggleTxn(t.id)} />
-                                    </td>
-                                    <td style={{ ...s.td, padding: '4px 8px', whiteSpace: 'nowrap' }}>{t.transaction_date}</td>
-                                    <td style={{ ...s.td, padding: '4px 8px', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description}</td>
-                                    <td style={{ ...s.td, padding: '4px 8px', color: '#6b7280', fontSize: 11 }}>{t.category || '—'}</td>
-                                    <td style={{ ...s.td, padding: '4px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: Number(t.amount) < 0 ? '#dc2626' : '#16a34a' }}>{Number(t.amount).toFixed(2)}</td>
-                                    <td style={{ ...s.td, padding: '4px 8px' }}>{t.account || '—'}</td>
-                                  </tr>
-                                ))}
-                                {visible.length > 100 && (
-                                  <tr><td colSpan={6} style={{ padding: '4px 8px', color: '#9ca3af', fontSize: 11 }}>…and {visible.length - 100} more — refine filter to narrow down</td></tr>
-                                )}
-                                {filter && visible.length === 0 && (
-                                  <tr><td colSpan={6} style={{ padding: '8px', color: '#9ca3af', fontSize: 12, textAlign: 'center' }}>No transactions match</td></tr>
-                                )}
-                              </tbody>
-                            </table>
-                          )
-                        })()}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </Fragment>
-            )
-          })}
-        </div>
-        </>)}
-
-        {view === 'transactions' && (
-          <div>
+        <div>
             {/* Status filter tabs */}
             <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap' as const }}>
               {([
-                { key: 'all',           label: 'All',           count: txns.length },
-                { key: 'unmapped',      label: 'Unmapped',      count: txns.filter(t => !t.account).length },
-                { key: 'mapped',        label: 'Mapped',        count: txns.filter(t => !!t.account).length },
-                { key: 'uncategorized', label: 'Uncategorized', count: txns.filter(t => !t.category).length },
+                { key: 'all',      label: 'All',      count: txns.length },
+                { key: 'unmapped', label: 'Unmapped', count: txns.filter(t => !t.account && !(t.splits?.length ?? 0)).length },
+                { key: 'mapped',   label: 'Mapped',   count: txns.filter(t => !!t.account || (t.splits?.length ?? 0) > 0).length },
               ] as const).map(f => (
                 <button
                   key={f.key}
@@ -1020,7 +513,7 @@ export default function Transactions({ clientId }: { clientId: string }) {
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' as const }}>
               <input
                 style={{ ...s.input, flex: '1 1 240px', fontSize: 12 }}
-                placeholder="Search description, bank category, account…"
+                placeholder="Search description, account…"
                 value={txSearch}
                 onChange={e => { setTxSearch(e.target.value); setTxPage(1); setTxSelected(new Set()) }}
               />
@@ -1096,8 +589,8 @@ export default function Transactions({ clientId }: { clientId: string }) {
             )}
 
             {/* Table */}
-            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 8, overflow: 'hidden' }}>
-              <table style={s.table}>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 8, overflowX: 'auto' }}>
+              <table style={{ ...s.table, tableLayout: 'fixed', width: colWidths.transaction_date + colWidths.description + colWidths.category + colWidths.account + colWidths.amount + 68 }}>
                 <thead>
                   <tr>
                     <th style={{ ...s.th, width: 32, padding: '7px 8px' }}>
@@ -1106,19 +599,23 @@ export default function Transactions({ clientId }: { clientId: string }) {
                     {([
                       { col: 'transaction_date' as const, label: 'Date' },
                       { col: 'description'      as const, label: 'Description' },
-                      { col: 'category'         as const, label: 'Bank Category' },
+                      { col: 'category'         as const, label: 'Category' },
                       { col: 'account'          as const, label: 'Account' },
                       { col: 'amount'           as const, label: 'Amount', right: true },
                     ]).map(({ col, label, right }) => (
                       <th
                         key={col}
-                        style={{ ...s.th, cursor: 'pointer', userSelect: 'none', textAlign: right ? 'right' : 'left', whiteSpace: 'nowrap' }}
+                        style={{ ...s.th, cursor: 'pointer', userSelect: 'none', textAlign: right ? 'right' : 'left', whiteSpace: 'nowrap', position: 'relative', width: colWidths[col] }}
                         onClick={() => setTxSort(col)}
                       >
                         {label}{' '}
                         <span style={{ opacity: txSortCol === col ? 0.75 : 0.25 }}>
                           {txSortCol === col ? (txSortDir === 'asc' ? '▲' : '▼') : '⇅'}
                         </span>
+                        <div
+                          style={{ position: 'absolute', right: 0, top: '15%', bottom: '15%', width: 4, cursor: 'col-resize', zIndex: 1, borderRight: `2px solid rgba(200,169,110,0.35)`, borderRadius: 1 }}
+                          onMouseDown={e => { e.stopPropagation(); e.preventDefault(); resizingRef.current = { col, startX: e.clientX, startW: colWidths[col] } }}
+                        />
                       </th>
                     ))}
                     <th style={{ ...s.th, width: 36 }} />
@@ -1134,11 +631,23 @@ export default function Transactions({ clientId }: { clientId: string }) {
                       <td style={{ ...s.td, padding: '5px 8px', width: 32 }} onClick={e => e.stopPropagation()}>
                         <input type="checkbox" checked={txSelected.has(t.id)} onChange={() => toggleTxRow(t.id)} />
                       </td>
-                      <td style={{ ...s.td, padding: '5px 10px', whiteSpace: 'nowrap' }}>{t.transaction_date}</td>
-                      <td style={{ ...s.td, padding: '5px 10px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description || '—'}</td>
-                      <td style={{ ...s.td, padding: '5px 10px', color: t.category ? T.charcoal : '#c0bdb7' }}>{t.category || '—'}</td>
-                      <td style={{ ...s.td, padding: '4px 6px', minWidth: 180 }} onClick={e => e.stopPropagation()}>
-                        {txEditId === t.id ? (
+                      <td style={{ ...s.td, padding: '5px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.transaction_date}</td>
+                      <td style={{ ...s.td, padding: '5px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description || '—'}</td>
+                      <td style={{ ...s.td, padding: '5px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.category ? T.charcoal : '#c0bdb7' }}>{t.category || '—'}</td>
+                      <td style={{ ...s.td, padding: '4px 6px' }} onClick={e => e.stopPropagation()}>
+                        {t.splits?.length ? (
+                          <div onClick={() => openSplitModal(t)} style={{ cursor: 'pointer' }}>
+                            {t.splits.map((sp, si) => (
+                              <div key={si} style={{ display: 'flex', justifyContent: 'space-between', gap: 4, fontSize: 11, lineHeight: 1.6 }}>
+                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: T.charcoal }}>{sp.account}</span>
+                                <span style={{ flexShrink: 0, fontVariantNumeric: 'tabular-nums', color: sp.amount < 0 ? '#dc2626' : '#16a34a' }}>
+                                  {sp.amount < 0 ? '−' : '+'}${Math.abs(sp.amount).toFixed(2)}
+                                </span>
+                              </div>
+                            ))}
+                            <span style={{ fontSize: 10, color: T.gold }}>Edit splits</span>
+                          </div>
+                        ) : txEditId === t.id ? (
                           <div
                             tabIndex={-1}
                             onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setTxEditId(null) }}
@@ -1159,13 +668,22 @@ export default function Transactions({ clientId }: { clientId: string }) {
                             />
                           </div>
                         ) : (
-                          <div
-                            onClick={() => { setTxEditId(t.id); setTxEditVal(t.account || '') }}
-                            onMouseEnter={e => (e.currentTarget.style.background = '#f3f4f6')}
-                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                            style={{ cursor: 'pointer', color: t.account ? T.charcoal : '#c0bdb7', padding: '3px 6px', borderRadius: 4, fontSize: 12 }}
-                          >
-                            {t.account || '— assign —'}
+                          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                            <div
+                              onClick={() => { setTxEditId(t.id); setTxEditVal(t.account || '') }}
+                              onMouseEnter={e => (e.currentTarget.style.background = '#f3f4f6')}
+                              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                              style={{ cursor: 'pointer', color: t.account ? T.charcoal : '#c0bdb7', padding: '3px 6px', borderRadius: 4, fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                            >
+                              {t.account || '— assign —'}
+                            </div>
+                            <button
+                              title="Split transaction"
+                              onClick={() => openSplitModal(t)}
+                              style={{ flexShrink: 0, background: 'none', border: `1px solid ${T.border}`, borderRadius: 3, cursor: 'pointer', color: '#9ca3af', fontSize: 11, padding: '1px 5px', lineHeight: 1.4 }}
+                              onMouseEnter={e => { e.currentTarget.style.color = T.gold; e.currentTarget.style.borderColor = T.gold }}
+                              onMouseLeave={e => { e.currentTarget.style.color = '#9ca3af'; e.currentTarget.style.borderColor = T.border }}
+                            >÷</button>
                           </div>
                         )}
                       </td>
@@ -1183,7 +701,7 @@ export default function Transactions({ clientId }: { clientId: string }) {
                     </tr>
                   ))}
                   {txPagedTxns.length === 0 && (
-                    <tr><td colSpan={7} style={{ padding: '32px', textAlign: 'center', color: '#9ca3af', fontSize: 12 }}>
+                    <tr><td colSpan={6} style={{ padding: '32px', textAlign: 'center', color: '#9ca3af', fontSize: 12 }}>
                       {txSearch ? 'No transactions match that search' : 'No transactions'}
                     </td></tr>
                   )}
@@ -1208,8 +726,7 @@ export default function Transactions({ clientId }: { clientId: string }) {
               </div>
             )}
           </div>
-        )}
-      </div>
+        </div>
 
       {createModal && (
         <div style={m.overlay} onClick={e => { if (e.target === e.currentTarget) setCreateModal(null) }}>
@@ -1252,6 +769,88 @@ export default function Transactions({ clientId }: { clientId: string }) {
         </div>
       )}
 
+      {splitModal && (() => {
+        const total = Number(splitModal.amount)
+        const allocated = splitLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)
+        const remaining = parseFloat((total - allocated).toFixed(2))
+        const balanced = Math.abs(remaining) < 0.005
+        return (
+          <div style={m.overlay} onClick={e => { if (e.target === e.currentTarget) setSplitModal(null) }}>
+            <div style={{ ...m.modal, maxWidth: 500 }}>
+              <div style={m.head}>
+                <h3 style={m.title}>Split Transaction</h3>
+                <button style={m.closeBtn} onClick={() => setSplitModal(null)}>✕</button>
+              </div>
+              <div style={m.body}>
+                <div style={{ marginBottom: 16, padding: '10px 12px', background: T.page, borderRadius: 6, fontSize: 12, color: T.charcoal }}>
+                  <div style={{ fontWeight: 600, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{splitModal.description}</div>
+                  <div style={{ color: '#6b7280' }}>
+                    {splitModal.transaction_date} · Total:{' '}
+                    <span style={{ fontWeight: 600, color: total < 0 ? '#dc2626' : '#16a34a' }}>
+                      {total < 0 ? '−' : '+'}${Math.abs(total).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                </div>
+
+                {splitLines.map((line, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                    <div style={{ flex: 1 }}>
+                      <CategoryInput
+                        value={line.account}
+                        onChange={v => setSplitLines(prev => prev.map((l, j) => j === i ? { ...l, account: v } : l))}
+                        groups={accountGroups}
+                        placeholder="Select account…"
+                      />
+                    </div>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={line.amount}
+                      onChange={e => setSplitLines(prev => prev.map((l, j) => j === i ? { ...l, amount: e.target.value } : l))}
+                      placeholder="Amount"
+                      style={{ ...m.input, width: 110, textAlign: 'right' as const }}
+                    />
+                    {splitLines.length > 2 && (
+                      <button
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#c0bdb7', fontSize: 14, padding: '2px 4px', lineHeight: 1, flexShrink: 0 }}
+                        onMouseEnter={e => (e.currentTarget.style.color = '#dc2626')}
+                        onMouseLeave={e => (e.currentTarget.style.color = '#c0bdb7')}
+                        onClick={() => setSplitLines(prev => prev.filter((_, j) => j !== i))}
+                      >✕</button>
+                    )}
+                  </div>
+                ))}
+
+                <button
+                  style={{ ...m.btnSec, fontSize: 11, padding: '4px 10px', marginBottom: 14 }}
+                  onClick={() => setSplitLines(prev => [...prev, { account: '', amount: '' }])}
+                >+ Add line</button>
+
+                <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4, color: balanced ? '#059669' : remaining === 0 ? '#059669' : '#d97706' }}>
+                  Remaining: {remaining < 0 ? '−' : remaining > 0 ? '+' : ''}${Math.abs(remaining).toFixed(2)}
+                  {balanced ? ' ✓' : ' — splits must equal the transaction total'}
+                </div>
+
+                <div style={m.actions}>
+                  {(splitModal.splits?.length ?? 0) > 0 && (
+                    <button
+                      style={{ ...m.btnSec, color: T.danger, borderColor: '#F5C2C2', marginRight: 'auto' }}
+                      onClick={() => clearSplitsOnTxn(splitModal.id)}
+                    >Clear splits</button>
+                  )}
+                  <button style={m.btnSec} onClick={() => setSplitModal(null)}>Cancel</button>
+                  <button
+                    style={{ ...m.btnPri, opacity: (!balanced || savingSplit) ? 0.5 : 1 }}
+                    disabled={!balanced || savingSplit}
+                    onClick={saveSplits}
+                  >{savingSplit ? 'Saving…' : 'Save splits'}</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
       {showImport && (
         <ImportModal
           clientId={clientId} allCats={allCats} catSectionMap={catSectionMap} existingTxns={txns}
@@ -1263,70 +862,29 @@ export default function Transactions({ clientId }: { clientId: string }) {
   )
 }
 
-// ─── Coverage Panel ───────────────────────────────────────────────────────────
-
-function CoveragePanel({ coverage }: { coverage: { accounts: string[]; months: string[]; map: Record<string, Record<string, number>> } }) {
-  const { accounts, months, map } = coverage
-  const fmtMonth = (ym: string) => {
-    const [y, mo] = ym.split('-')
-    return new Date(+y, +mo - 1, 1).toLocaleString('default', { month: 'short', year: '2-digit' })
-  }
-  return (
-    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 6, padding: '12px 16px', marginBottom: 16, overflowX: 'auto' }}>
-      <h3 style={{ fontSize: 10.5, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', margin: '0 0 10px' }}>Upload Coverage</h3>
-      <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
-        <thead>
-          <tr>
-            <th style={{ padding: '4px 10px 4px 0', textAlign: 'left', color: T.charcoal, fontWeight: 600, whiteSpace: 'nowrap', minWidth: 130 }}>Account</th>
-            {months.map(ym => (
-              <th key={ym} style={{ padding: '4px 6px', textAlign: 'center', color: T.charcoal, fontWeight: 500, whiteSpace: 'nowrap' }}>{fmtMonth(ym)}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {accounts.map(acct => (
-            <tr key={acct}>
-              <td style={{ padding: '3px 10px 3px 0', color: T.charcoal, whiteSpace: 'nowrap', fontWeight: 500 }}>{acct}</td>
-              {months.map(ym => {
-                const count = map[acct]?.[ym] ?? 0
-                return (
-                  <td key={ym} style={{ padding: '3px 6px', textAlign: 'center' }}>
-                    {count > 0
-                      ? <span style={{ display: 'inline-block', background: '#D1E8D4', color: '#1A5C28', borderRadius: 3, padding: '1px 7px', fontWeight: 500 }}>{count}</span>
-                      : <span style={{ display: 'inline-block', background: T.page, color: '#C0BDB7', borderRadius: 3, padding: '1px 7px' }}>—</span>
-                    }
-                  </td>
-                )
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
 // ─── Import Modal ─────────────────────────────────────────────────────────────
 
 function autoDetectCols(headers: string[]): Partial<CsvCfg> & { cols: Record<string, string> } {
-  const find = (candidates: string[]) => {
+  const find = (candidates: string[], exclude?: string[]) => {
     const h = headers.map(x => x.toLowerCase().trim())
     for (const c of candidates) {
-      const idx = h.findIndex(x => x === c || x.includes(c))
+      const idx = h.findIndex(x => (x === c || x.includes(c)) && !exclude?.some(e => x.includes(e)))
       if (idx >= 0) return headers[idx]
     }
     return ''
   }
-  const credit = find(['cr amount','credit amount','credit','deposits'])
-  const debit  = find(['db amount','debit amount','debit','withdrawals'])
+  // exclude headers containing both "credit" and "debit" — those are indicator columns, not amount columns
+  const credit = find(['cr amount','credit amount','credit','deposits'], ['debit'])
+  const debit  = find(['db amount','debit amount','debit','withdrawals'], ['credit'])
   const splitAmounts = !!(credit || debit)
+  const indicatorCol = headers.find(h => { const l = h.toLowerCase(); return l.includes('credit') && l.includes('debit') }) ?? ''
   return {
     splitAmounts,
+    indicatorCol,
     cols: {
       transaction_date: find(['date','posted date','posting date','transaction date','trans date']),
       description:      find(['description','memo','payee','narrative','details','name','transaction description']),
       amount:           splitAmounts ? '' : find(['amount','transaction amount','net amount']),
-      account:          find(['account name','account number','account']),
       reference_id:     find(['ref num','reference','ref','check number','transaction id','confirmation']),
       category:         find(['category']),
       credit, debit,
@@ -1348,26 +906,22 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
   const [parsed,     setParsed]     = useState<ParsedRow[]>([])
   const [parseErrs,  setParseErrs]  = useState<Array<{ line: number; msg: string }>>([])
   const [catLoading, setCatLoading] = useState(false)
-  const [toInsert,   setToInsert]   = useState<ParsedRow[]>([])
-  const [dupCount,   setDupCount]   = useState(0)
-  const [newGroups,  setNewGroups]  = useState<MerchantGroup[]>([])
-  const [catAssign,  setCatAssign]  = useState<Record<string, string>>({})
-  const [expanded,   setExpanded]   = useState<Record<string, boolean>>({})
-  const [result,     setResult]     = useState<{ inserted: number; skipped: number; errors: string[]; parseErrors: unknown[] } | null>(null)
+  const [importRows,   setImportRows]   = useState<ParsedRow[]>([])
+  const [dupeRows,     setDupeRows]     = useState<ParsedRow[]>([])
+  const [showDupes,    setShowDupes]    = useState(false)
+  const [uploadErrors, setUploadErrors] = useState<string[]>([])
+  const [result,       setResult]       = useState<{ inserted: number; skipped: number; errors: string[]; parseErrors: unknown[] } | null>(null)
   const [showInstr,  setShowInstr]  = useState(false)
+  const [catLoadingMsg, setCatLoadingMsg] = useState('')
+  const [rawUploadOk,   setRawUploadOk]   = useState(false)
+  const [finAccounts,   setFinAccounts]   = useState<{ id: string; name: string; institution: string | null; account_type: string }[]>([])
   const fileRef = useRef<HTMLInputElement>(null)
 
-  const groupedCats = useMemo(() => {
-    const bySection: Record<string, string[]> = {}
-    allCats.forEach(name => {
-      const sec = catSectionMap[name] ?? 'Other'
-      if (!bySection[sec]) bySection[sec] = []
-      bySection[sec].push(name)
-    })
-    const ordered = ALL_SECTIONS.filter(s => bySection[s]?.length).map(s => ({ section: s, accounts: bySection[s] }))
-    if (bySection['Other']?.length) ordered.push({ section: 'Other', accounts: bySection['Other'] })
-    return ordered.length ? ordered : null
-  }, [allCats, catSectionMap])
+  useEffect(() => {
+    supabase.from('financial_accounts').select('id,name,institution,account_type')
+      .eq('client_id', clientId ?? '').order('created_at')
+      .then(({ data }) => setFinAccounts(data ?? []))
+  }, [clientId])
 
   const handleFile = useCallback((file: File | null | undefined) => {
     if (!file) return
@@ -1391,46 +945,34 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
           return firstVal.toLowerCase() !== 'totals' && !firstVal.includes(' - ')
         }),
       }
-      const { cols, splitAmounts } = autoDetectCols(data.headers)
+      const { cols, splitAmounts, indicatorCol } = autoDetectCols(data.headers)
       const base = DEFAULT_CFG()
-      setCsv(data); setCfg({ ...base, cols: { ...base.cols, ...cols }, splitAmounts: splitAmounts ?? false }); setMapError(''); setStep('mapping')
+      setCsv(data); setCfg({ ...base, cols: { ...base.cols, ...cols }, splitAmounts: splitAmounts ?? false, indicatorCol: indicatorCol ?? '' }); setMapError(''); setStep('mapping')
     }
     reader.readAsText(file)
-  }, [])
-
-  const unbundle = useCallback((fromGroupKey: string, row: ParsedRow) => {
-    const uniqueKey = `unbundled_${Date.now()}_${Math.random().toString(36).slice(2)}`
-    setNewGroups(gs => {
-      const updated = gs.map(g => {
-        if (g.key !== fromGroupKey) return g
-        const remaining = (g.txns as ParsedRow[]).filter(t => t !== row)
-        return { ...g, txns: remaining, total: remaining.reduce((s, t) => s + t.amount, 0) }
-      }).filter(g => g.txns.length > 0)
-      return [...updated, { key: uniqueKey, displayDesc: row.description, txns: [row], total: row.amount, suggestedCat: '', variants: [] }]
-    })
-    setCatAssign(prev => ({ ...prev, [uniqueKey]: prev[fromGroupKey] ?? '' }))
   }, [])
 
   const setCol  = (key: string, val: string) => { setCfg(c => ({ ...c, cols: { ...c.cols, [key]: val } })); setMapError('') }
   const setProp = (key: keyof CsvCfg, val: unknown) => setCfg(c => ({ ...c, [key]: val }))
 
-  const onApplyMapping = () => {
-    const { cols, dateFormat, splitAmounts, debitsPositive, bankName } = cfg
+  const onApplyMapping = async () => {
+    const { cols, dateFormat, splitAmounts, debitsPositive, indicatorCol, sourceAccountId } = cfg
+    if (!sourceAccountId)                            { setMapError('Please select a financial account'); return }
     if (!cols.transaction_date)                      { setMapError('Please map the Date column'); return }
     if (!cols.description)                           { setMapError('Please map the Description column'); return }
     if (!splitAmounts && !cols.amount)               { setMapError('Please map the Amount column'); return }
     if (splitAmounts && !cols.debit && !cols.credit) { setMapError('Please map at least one of Debit or Credit'); return }
     setMapError('')
-    if (bankName.trim()) saveBankMapping(bankName.trim(), cfg)
+    saveBankMapping(sourceAccountId, cfg)
 
-    const errors: Array<{ line: number; msg: string }> = [], rows: ParsedRow[] = []
-    csv!.rows.forEach((raw, i) => {
+    // Parse all rows and generate deterministic UUIDs in parallel
+    const settled = await Promise.all(csv!.rows.map(async (raw, i) => {
       const line = i + 2
       const rawDate = raw[cols.transaction_date] || ''
       const date = parseDate(rawDate, dateFormat)
-      if (!date) { errors.push({ line, msg: `Invalid date "${rawDate}"` }); return }
+      if (!date) return { error: { line, msg: `Invalid date "${rawDate}"` } }
       const rawDesc = (raw[cols.description] || '').trim()
-      if (!rawDesc) { errors.push({ line, msg: 'Empty description' }); return }
+      if (!rawDesc) return { error: { line, msg: 'Empty description' } }
       let amount: number
       if (splitAmounts) {
         const credit = parseFloat((raw[cols.credit] || '0').replace(/[$,\s]/g, '')) || 0
@@ -1439,17 +981,26 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
       } else {
         const rawAmt = (raw[cols.amount] || '').replace(/[$,\s]/g, '')
         amount = parseFloat(rawAmt)
-        if (isNaN(amount)) { errors.push({ line, msg: `Invalid amount "${raw[cols.amount]}"` }); return }
+        if (isNaN(amount)) return { error: { line, msg: `Invalid amount "${raw[cols.amount]}"` } }
         if (debitsPositive) amount = -amount
+        if (indicatorCol && raw[indicatorCol]) {
+          const ind = (raw[indicatorCol] || '').toLowerCase().trim()
+          if (ind === 'debit' || ind === 'dr') amount = -Math.abs(amount)
+          else if (ind === 'credit' || ind === 'cr') amount = Math.abs(amount)
+        }
       }
-      rows.push({
+      const id = await deterministicUUID(sourceAccountId, date, amount, rawDesc)
+      return { row: {
+        id,
         transaction_date: date, description: rawDesc, amount,
-        ...(cols.account      && raw[cols.account]      ? { account:      raw[cols.account].trim()      } : {}),
+        source_account_id: sourceAccountId,
         ...(cols.reference_id && raw[cols.reference_id] ? { reference_id: raw[cols.reference_id].trim() } : {}),
         ...(cols.category     && raw[cols.category]     ? { category:     raw[cols.category].trim()     } : {}),
         ...(clientId !== null ? { client_id: clientId } : {}),
-      })
-    })
+      } as ParsedRow }
+    }))
+    const errors = settled.filter(r => 'error' in r).map(r => (r as { error: { line: number; msg: string } }).error)
+    const rows   = settled.filter(r => 'row'   in r).map(r => (r as { row: ParsedRow }).row)
     setParsed(rows); setParseErrs(errors); setStep('categorize')
   }
 
@@ -1458,11 +1009,11 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
     let cancelled = false
     const run = async () => {
       setCatLoading(true)
+      setRawUploadOk(false)
       try {
-        const existingFPs = new Set<string>()
+        // Build category suggestion map from in-memory transactions (used for suggestions only)
         const descCatMap: Record<string, string> = {}
         existingTxns.forEach(r => {
-          existingFPs.add(fingerprint(r))
           if (r.category) {
             const k = normKey(r.description)
             if (k && !descCatMap[k]) descCatMap[k] = r.category
@@ -1470,75 +1021,55 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
         })
         if (cancelled) return
 
-        const seenFPs = new Set(existingFPs)
-        const newRows: ParsedRow[] = [], dupes: ParsedRow[] = []
+        // Deduplicate within the CSV itself (same row appearing twice)
+        const seenIds = new Set<string>()
+        const uniqueParsed: ParsedRow[] = [], withinCsvDupes: ParsedRow[] = []
         parsed.forEach(row => {
-          const fp = fingerprint(row)
-          if (seenFPs.has(fp)) { dupes.push(row); return }
-          newRows.push(row); seenFPs.add(fp)
+          if (seenIds.has(row.id!)) { withinCsvDupes.push(row); return }
+          seenIds.add(row.id!); uniqueParsed.push(row)
         })
 
-        const catIdx = buildCatIndex(descCatMap)
-        const groupMap: Record<string, MerchantGroup> = {}
-        newRows.forEach(row => {
-          const key = normKey(row.description)
-          if (!groupMap[key]) groupMap[key] = { key, displayDesc: row.description, txns: [], total: 0, suggestedCat: suggestCat(key, catIdx) }
-          ;(groupMap[key].txns as ParsedRow[]).push(row)
-          groupMap[key].total += row.amount
+        // Upload all unique rows in parallel batches.
+        // select('id') returns only rows actually inserted (ON CONFLICT DO NOTHING RETURNING *),
+        // giving us accurate new-vs-duplicate counts without a separate check query.
+        setCatLoadingMsg('Uploading transactions…')
+        const uploadBatches: ParsedRow[][] = []
+        for (let i = 0; i < uniqueParsed.length; i += 500) uploadBatches.push(uniqueParsed.slice(i, i + 500))
+        const uploadResults = uniqueParsed.length > 0
+          ? await Promise.all(uploadBatches.map(batch =>
+              supabase.from('bank_transactions').upsert(batch, { onConflict: 'id', ignoreDuplicates: true }).select('id')
+            ))
+          : []
+        if (cancelled) return
+
+        const insertedIds = new Set<string>()
+        let uploadOk = true
+        uploadResults.forEach(({ data, error }) => {
+          if (error) { uploadOk = false; return }
+          data?.forEach(r => insertedIds.add(r.id))
         })
+        setRawUploadOk(uploadOk)
 
-        const rawGroups = Object.values(groupMap).sort((a, b) => a.key.localeCompare(b.key))
-        const { clusters, keyToCluster: _ } = clusterGroups(rawGroups)
+        const newRows = uniqueParsed.filter(r => insertedIds.has(r.id!))
+        const dupes   = [...withinCsvDupes, ...uniqueParsed.filter(r => !insertedIds.has(r.id!))]
 
-        const initAssign: Record<string, string> = {}
-        clusters.forEach(g => {
-          const importedCat = dominantCat(g.txns as Txn[])
-          if (importedCat)        initAssign[g.key] = importedCat
-          else if (g.suggestedCat) initAssign[g.key] = g.suggestedCat
-        })
-
-        setToInsert(newRows); setDupCount(dupes.length)
-        setNewGroups(clusters); setCatAssign(initAssign)
+        const errs = uploadResults.filter(r => r.error).map(r => r.error!.message)
+        if (!cancelled) {
+          setImportRows(newRows)
+          setDupeRows(dupes)
+          setUploadErrors(errs)
+        }
       } catch (e: unknown) {
         alert('Error: ' + (e as Error).message); setStep('mapping')
       } finally {
-        if (!cancelled) setCatLoading(false)
+        if (!cancelled) { setCatLoading(false); setCatLoadingMsg('') }
       }
     }
     run()
     return () => { cancelled = true }
   }, [step]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const doUpload = async () => {
-    setStep('uploading')
-    try {
-      const txnCatMap = new Map<ParsedRow, string>()
-      newGroups.forEach(group => {
-        const cat = (catAssign[group.key] || '').trim()
-        ;(group.txns as ParsedRow[]).forEach(row => txnCatMap.set(row, cat))
-      })
-      const rowsToSave = toInsert.map(row => {
-        const cat = txnCatMap.get(row) || ''
-        return cat ? { ...row, category: cat } : row
-      })
-      let inserted = 0; const errs: string[] = []
-      for (let i = 0; i < rowsToSave.length; i += 500) {
-        const { data, error } = await supabase
-          .from('bank_transactions').upsert(rowsToSave.slice(i, i + 500), { onConflict: 'client_id,transaction_date,description,amount', ignoreDuplicates: true }).select()
-        if (error) errs.push(error.message)
-        else inserted += data?.length ?? 0
-      }
-      setResult({ inserted, skipped: dupCount, errors: errs, parseErrors: parseErrs })
-      setStep('result')
-    } catch (e: unknown) {
-      setResult({ inserted: 0, skipped: dupCount, errors: [(e as Error).message], parseErrors: parseErrs })
-      setStep('result')
-    }
-  }
-
-  const savedBanks = Object.keys(loadAllMappings())
   const colOptions = csv ? csv.headers.map(h => <option key={h} value={h}>{h}</option>) : []
-  const bankDDVal  = savedBanks.includes(cfg.bankName) ? cfg.bankName : ''
 
   return (
     <div style={m.overlay} onClick={e => { if (e.target === e.currentTarget) onClose() }}>
@@ -1605,21 +1136,33 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
           {step === 'mapping' && csv && (
             <div>
               <p style={m.sub}>{csv.rows.length} rows · columns: <em>{csv.headers.join(', ')}</em></p>
-              <ISection title="Bank">
-                <IRow label="Saved banks">
-                  <select style={m.select} value={bankDDVal} onChange={e => {
-                    const val = e.target.value; if (!val) return
-                    const all = loadAllMappings()
-                    if (all[val]) setCfg({ ...all[val], bankName: val })
-                    else setProp('bankName', val)
-                  }}>
-                    <option value="">— Select to load saved mapping —</option>
-                    {savedBanks.map(b => <option key={b} value={b}>{b}</option>)}
-                  </select>
+              <ISection title="Account">
+                <IRow label={<>Financial account <span style={{ color: '#dc2626', fontWeight: 700 }}>*</span></>}>
+                  {finAccounts.length === 0 ? (
+                    <div style={{ fontSize: 12, color: '#dc2626' }}>
+                      No accounts set up. <a href="/accounts" target="_blank" style={{ color: '#2C5F52' }}>Add one on the Accounts page</a>, then re-open this dialog.
+                    </div>
+                  ) : (
+                    <select style={m.select} value={cfg.sourceAccountId} onChange={e => {
+                      const id = e.target.value
+                      const saved = loadAllMappings()[id]
+                      if (saved) {
+                        const { indicatorCol: auto } = csv ? autoDetectCols(csv.headers) : { indicatorCol: '' }
+                        setCfg({ ...DEFAULT_CFG(), indicatorCol: auto ?? '', ...saved, sourceAccountId: id })
+                      } else {
+                        setProp('sourceAccountId', id)
+                      }
+                    }}>
+                      <option value="">— Select account —</option>
+                      {finAccounts.map(a => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}{a.institution ? ` (${a.institution})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </IRow>
-                <IRow label="Bank name (to save)">
-                  <input style={m.input} value={cfg.bankName} onChange={e => setProp('bankName', e.target.value)} placeholder="e.g. Chase Checking" />
-                </IRow>
+
               </ISection>
 
               <ISection title="Map CSV Columns">
@@ -1668,7 +1211,13 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
                     <IRow label="Debits shown as positive numbers">
                       <input type="checkbox" checked={cfg.debitsPositive} onChange={e => setProp('debitsPositive', e.target.checked)} />
                     </IRow>
-                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 0 232px' }}>Sign will be flipped if enabled.</p>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px 232px' }}>Sign will be flipped if enabled.</p>
+                    <IRow label="Debit/credit indicator column">
+                      <select style={m.select} value={cfg.indicatorCol} onChange={e => setProp('indicatorCol', e.target.value)}>
+                        <option value="">— not mapped —</option>{colOptions}
+                      </select>
+                    </IRow>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 0 232px' }}>Column containing &quot;Debit&quot; / &quot;Credit&quot; text. Overrides sign flip above.</p>
                   </>
                 )}
               </ISection>
@@ -1686,129 +1235,111 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
               {catLoading ? (
                 <div style={{ textAlign: 'center', padding: '48px 0' }}>
                   <div style={m.spinner} />
-                  <p style={{ color: '#6b7280', marginTop: 12 }}>Checking for duplicates…</p>
+                  <p style={{ color: '#6b7280', marginTop: 12 }}>{catLoadingMsg || 'Uploading…'}</p>
                 </div>
               ) : (
                 <>
                   <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-                    <StatCard label="New transactions"   value={toInsert.length}  color="#2563eb" />
-                    <StatCard label="Duplicates skipped" value={dupCount}         color="#d97706" />
-                    <StatCard label="Parse errors"       value={parseErrs.length} color={parseErrs.length ? '#dc2626' : '#9ca3af'} />
+                    <StatCard label="Imported"     value={importRows.length} color="#2563eb" />
+                    <StatCard label="Duplicates"   value={dupeRows.length}   color="#d97706" />
+                    <StatCard label="Parse errors" value={parseErrs.length}  color={parseErrs.length ? '#dc2626' : '#9ca3af'} />
                   </div>
-                  {parseErrs.length > 0 && (
+
+                  {(uploadErrors.length > 0 || parseErrs.length > 0) && (
                     <div style={m.errBox}>
-                      <strong>{parseErrs.length} row(s) could not be parsed:</strong>
-                      <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
-                        {parseErrs.slice(0, 8).map((e, i) => <li key={i}>Line {e.line}: {e.msg}</li>)}
-                        {parseErrs.length > 8 && <li>…and {parseErrs.length - 8} more</li>}
-                      </ul>
+                      {parseErrs.length > 0 && <>
+                        <strong>{parseErrs.length} row(s) could not be parsed:</strong>
+                        <ul style={{ margin: '6px 0 8px', paddingLeft: 20 }}>
+                          {parseErrs.slice(0, 5).map((e, i) => <li key={i}>Line {e.line}: {e.msg}</li>)}
+                          {parseErrs.length > 5 && <li>…and {parseErrs.length - 5} more</li>}
+                        </ul>
+                      </>}
+                      {uploadErrors.length > 0 && <>
+                        <strong>Upload errors:</strong>
+                        <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
+                          {uploadErrors.map((e, i) => <li key={i}>{e}</li>)}
+                        </ul>
+                      </>}
                     </div>
                   )}
-                  {toInsert.length === 0 ? (
-                    <p style={{ color: '#6b7280', fontSize: 14, padding: '16px 0' }}>All {dupCount} rows already exist — nothing new to import.</p>
-                  ) : (
-                    <>
-                      {(() => {
-                        const uncatCount = newGroups.filter(g => !(catAssign[g.key] || '').trim()).length
-                        const hasSugg = Object.keys(catAssign).length > 0
-                        return (
-                          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                            {hasSugg && <span>Purple dot = category suggested from previous transactions. Change any before importing.</span>}
-                            {uncatCount > 0 && (
-                              <span style={{ color: '#d97706' }}>
-                                {uncatCount} group{uncatCount !== 1 ? 's' : ''} without a category — they will import uncategorized.
-                              </span>
-                            )}
-                          </div>
-                        )
-                      })()}
-                      <div style={{ overflowX: 'auto', maxHeight: 420, overflowY: 'auto' }}>
+
+                  {/* New transactions */}
+                  {importRows.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <p style={{ fontSize: 11, fontWeight: 700, color: T.gold, textTransform: 'uppercase' as const, letterSpacing: '.06em', margin: '0 0 6px' }}>
+                        New transactions — {importRows.length}
+                      </p>
+                      <div style={{ border: `1px solid ${T.border}`, borderRadius: 6, overflowY: 'auto', maxHeight: 280 }}>
                         <table style={m.table}>
                           <thead>
                             <tr>
+                              <th style={m.th}>Date</th>
                               <th style={m.th}>Description</th>
-                              <th style={{ ...m.th, minWidth: 220 }}>Category</th>
-                              <th style={{ ...m.th, width: 60, textAlign: 'right' }}>Txns</th>
-                              <th style={{ ...m.th, width: 100, textAlign: 'right' }}>Total</th>
-                              <th style={{ ...m.th, width: 36 }}></th>
+                              <th style={{ ...m.th, textAlign: 'right' }}>Amount</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {newGroups.map((g, i) => {
-                              const cat    = catAssign[g.key] ?? ''
-                              const isSugg = cat !== '' && cat === g.suggestedCat
-                              const isExp  = !!expanded[g.key]
-                              return (
-                                <Fragment key={g.key}>
-                                  <tr style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
-                                    <td style={{ ...m.td, maxWidth: 0, width: '99%', overflow: 'hidden' }}>
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
-                                        {isSugg && <span style={s.suggDot} />}
-                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.displayDesc}</span>
-                                        {(g.variants?.length ?? 0) > 0 && <span style={s.badge}>+{g.variants!.length} similar</span>}
-                                      </div>
-                                    </td>
-                                    <td style={m.td}>
-                                      <CategoryInput
-                                        value={cat}
-                                        onChange={val => setCatAssign(p => ({ ...p, [g.key]: val }))}
-                                        categories={allCats} groups={groupedCats}
-                                        style={isSugg ? { border: '1px solid #a78bfa', background: '#faf5ff' } : {}}
-                                      />
-                                    </td>
-                                    <td style={{ ...m.td, textAlign: 'right', color: '#9ca3af', fontSize: 13 }}>{(g.txns as ParsedRow[]).length}</td>
-                                    <td style={{ ...m.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: g.total < 0 ? '#dc2626' : '#16a34a' }}>{g.total.toFixed(2)}</td>
-                                    <td style={m.td}>
-                                      <button style={s.expandBtn} onClick={() => setExpanded(p => ({ ...p, [g.key]: !p[g.key] }))}>{isExp ? '▲' : '▼'}</button>
-                                    </td>
-                                  </tr>
-                                  {isExp && (
-                                    <tr>
-                                      <td colSpan={5} style={{ padding: 0, background: '#f0f9ff', borderBottom: '2px solid #bae6fd' }}>
-                                        <div style={{ padding: '8px 12px 10px 16px' }}>
-                                          {(g.variants?.length ?? 0) > 0 && (
-                                            <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 6px' }}>
-                                              <strong>Grouped:</strong> {[g.displayDesc, ...(g.variants ?? [])].join(', ')}
-                                            </p>
-                                          )}
-                                          <table style={{ ...m.table, fontSize: 12 }}>
-                                            <thead>
-                                              <tr>{['Date','Description','Amount',''].map((h, hi) => (
-                                                <th key={hi} style={{ ...m.th, background: '#e0f2fe', padding: '5px 8px', fontSize: 11 }}>{h}</th>
-                                              ))}</tr>
-                                            </thead>
-                                            <tbody>
-                                              {(g.txns as ParsedRow[]).map((r, ri) => (
-                                                <tr key={ri} style={{ background: '#fff' }}>
-                                                  <td style={{ ...m.td, padding: '4px 8px', whiteSpace: 'nowrap' }}>{r.transaction_date}</td>
-                                                  <td style={{ ...m.td, padding: '4px 8px', maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.description}</td>
-                                                  <td style={{ ...m.td, padding: '4px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: r.amount < 0 ? '#dc2626' : '#16a34a' }}>{r.amount.toFixed(2)}</td>
-                                                  <td style={{ ...m.td, padding: '2px 6px', width: 28 }}>
-                                                    {(g.txns as ParsedRow[]).length > 1 && (
-                                                      <button title="Move to its own category group" style={s.unbundleBtn} onClick={() => unbundle(g.key, r)}>↗</button>
-                                                    )}
-                                                  </td>
-                                                </tr>
-                                              ))}
-                                            </tbody>
-                                          </table>
-                                        </div>
-                                      </td>
-                                    </tr>
-                                  )}
-                                </Fragment>
-                              )
-                            })}
+                            {importRows.map((r, i) => (
+                              <tr key={r.id} style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
+                                <td style={{ ...m.td, whiteSpace: 'nowrap' }}>{r.transaction_date}</td>
+                                <td style={{ ...m.td, maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.description}</td>
+                                <td style={{ ...m.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: r.amount < 0 ? '#dc2626' : '#16a34a' }}>
+                                  {r.amount < 0 ? '−' : '+'}${Math.abs(r.amount).toFixed(2)}
+                                </td>
+                              </tr>
+                            ))}
                           </tbody>
                         </table>
                       </div>
-                    </>
+                    </div>
                   )}
+
+                  {importRows.length === 0 && (
+                    <p style={{ color: '#6b7280', fontSize: 14, padding: '8px 0 16px' }}>All rows already exist — nothing new was imported.</p>
+                  )}
+
+                  {/* Duplicates — collapsible */}
+                  {dupeRows.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <button
+                        style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: 11, fontWeight: 700, color: '#d97706', textTransform: 'uppercase' as const, letterSpacing: '.06em' }}
+                        onClick={() => setShowDupes(v => !v)}
+                      >
+                        {showDupes ? '▲' : '▼'} Duplicates skipped — {dupeRows.length} (click to review)
+                      </button>
+                      {showDupes && (
+                        <div style={{ border: `1px solid ${T.border}`, borderRadius: 6, overflowY: 'auto', maxHeight: 220, marginTop: 6 }}>
+                          <table style={m.table}>
+                            <thead>
+                              <tr>
+                                <th style={m.th}>Date</th>
+                                <th style={m.th}>Description</th>
+                                <th style={{ ...m.th, textAlign: 'right' }}>Amount</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {dupeRows.map((r, i) => (
+                                <tr key={r.id || i} style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
+                                  <td style={{ ...m.td, whiteSpace: 'nowrap' }}>{r.transaction_date}</td>
+                                  <td style={{ ...m.td, maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.description}</td>
+                                  <td style={{ ...m.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: r.amount < 0 ? '#dc2626' : '#16a34a' }}>
+                                    {r.amount < 0 ? '−' : '+'}${Math.abs(r.amount).toFixed(2)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div style={m.actions}>
                     <button style={m.btnSec} onClick={() => setStep('mapping')}>← Back</button>
-                    {toInsert.length > 0 && (
-                      <button style={m.btnPri} onClick={doUpload}>Import {toInsert.length} transaction{toInsert.length !== 1 ? 's' : ''}</button>
-                    )}
+                    <button style={m.btnPri} onClick={() => {
+                      setResult({ inserted: importRows.length, skipped: dupeRows.length, errors: uploadErrors, parseErrors: parseErrs })
+                      setStep('result')
+                    }}>Done →</button>
                   </div>
                 </>
               )}

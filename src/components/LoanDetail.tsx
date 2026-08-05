@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 import {
   type Loan, type LoanPayment, type LoanDisbursement, type AmortizationRow,
-  INSTRUMENT_LABELS, usesFactorRate, hasFixedSchedule, costLabel, isInformalDebt,
+  INSTRUMENT_LABELS, usesFactorRate, usesFlatFee, hasFixedSchedule, costLabel, isInformalDebt,
   generateAmortizationSchedule, calcOutstandingBalance, calcTotalDrawn, calcRemainingToDisburse,
   suggestPaymentSplit,
 } from '@/lib/loans'
@@ -17,9 +17,58 @@ const D = {
   muted: 'rgba(74,74,63,0.55)',
 }
 
+// Inline transaction cell for a schedule row — shows linked txn info + reassign button
+function SchedTxnCell({ txn, pay, onEdit, label }: {
+  txn: BankTxn | null | undefined
+  pay: LoanPayment | null | undefined
+  onEdit: () => void
+  label?: string
+}) {
+  if (!pay) return <span style={{ color: 'rgba(74,74,63,0.55)', fontSize: 11, fontStyle: 'italic' }}>{label ?? '—'}</span>
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {txn ? (
+          <>
+            <div style={{ color: '#4A4A3F', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{txn.description}</div>
+            <div style={{ color: 'rgba(74,74,63,0.55)', fontSize: 10.5 }}>{txn.transaction_date} · {'$' + Math.abs(Number(txn.amount)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+          </>
+        ) : (
+          <span style={{ color: 'rgba(74,74,63,0.55)', fontSize: 11, fontStyle: 'italic' }}>{label ?? 'No transaction linked'}</span>
+        )}
+      </div>
+      <button
+        onClick={onEdit}
+        title="Reassign bank transaction"
+        style={{ flexShrink: 0, background: 'none', border: '1px solid #D9D4C8', borderRadius: 3, cursor: 'pointer', color: 'rgba(74,74,63,0.55)', fontSize: 10, padding: '1px 5px', lineHeight: 1.5 }}
+        onMouseEnter={e => { e.currentTarget.style.color = '#C8A96E'; e.currentTarget.style.borderColor = '#C8A96E' }}
+        onMouseLeave={e => { e.currentTarget.style.color = 'rgba(74,74,63,0.55)'; e.currentTarget.style.borderColor = '#D9D4C8' }}
+      >↔</button>
+    </div>
+  )
+}
+
+function Pager({ page, total, perPage, onChange }: { page: number; total: number; perPage: number; onChange: (p: number) => void }) {
+  const pages = Math.ceil(total / perPage)
+  if (pages <= 1) return null
+  return (
+    <div className="no-print" style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '8px 12px', borderTop: `1px solid ${D.border}`, fontSize: 11.5, color: D.muted }}>
+      <span>{page * perPage + 1}–{Math.min((page + 1) * perPage, total)} of {total}</span>
+      <button onClick={() => onChange(page - 1)} disabled={page === 0} style={{ background: 'none', border: `1px solid ${D.border}`, borderRadius: 3, padding: '2px 8px', cursor: page === 0 ? 'default' : 'pointer', opacity: page === 0 ? 0.4 : 1, fontSize: 12 }}>◀</button>
+      <button onClick={() => onChange(Math.min(page + 1, pages - 1))} disabled={page >= pages - 1} style={{ background: 'none', border: `1px solid ${D.border}`, borderRadius: 3, padding: '2px 8px', cursor: page >= pages - 1 ? 'default' : 'pointer', opacity: page >= pages - 1 ? 0.4 : 1, fontSize: 12 }}>▶</button>
+    </div>
+  )
+}
+
 const fmt = (n: number) =>
   '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const fmtDate = (s: string) => new Date(s + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+
+// Returns the amount that applies to a specific account — uses the split leg when the transaction is split
+function effectiveAmt(t: BankTxn, accountName: string | null): number {
+  if (!accountName || !t.splits?.length) return Number(t.amount)
+  return t.splits.find(s => s.account === accountName)?.amount ?? Number(t.amount)
+}
 
 const inp: React.CSSProperties = {
   width: '100%', padding: '7px 10px', border: `1px solid ${D.border}`,
@@ -29,7 +78,11 @@ const lbl: React.CSSProperties = {
   fontSize: 11, fontWeight: 600, color: D.charcoal, marginBottom: 3, display: 'block',
 }
 
-interface BankTxn { id: string; transaction_date: string; description: string; amount: number }
+interface BankTxn {
+  id: string; transaction_date: string; description: string; amount: number
+  account?: string | null
+  splits?: Array<{ account: string; amount: number }> | null
+}
 
 interface PayForm {
   payment_date: string
@@ -79,6 +132,9 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
   const [linkedAccount, setLinkedAccount] = useState<string | null>(null)
   const [linkedTxns, setLinkedTxns] = useState<BankTxn[]>([])
   const [paymentTxns, setPaymentTxns] = useState<Record<string, BankTxn>>({})
+  const [payPage, setPayPage] = useState(0)
+  const [linkedPage, setLinkedPage] = useState(0)
+  const [schedPage, setSchedPage] = useState(0)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -114,13 +170,18 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
     const accountName = linkedCat?.name ?? null
     setLinkedAccount(accountName)
     if (accountName) {
-      const { data: txnRows } = await supabase
-        .from('bank_transactions')
-        .select('id, transaction_date, description, amount')
-        .eq('account', accountName)
-        .eq('client_id', clientId)
-        .order('transaction_date')
-      setLinkedTxns(txnRows ?? [])
+      const sel = 'id, transaction_date, description, amount, account, splits'
+      const [{ data: directRows }, { data: splitRows }] = await Promise.all([
+        supabase.from('bank_transactions').select(sel)
+          .eq('client_id', clientId).eq('account', accountName).order('transaction_date'),
+        supabase.from('bank_transactions').select(sel)
+          .eq('client_id', clientId).filter('splits', 'cs', JSON.stringify([{ account: accountName }])).order('transaction_date'),
+      ])
+      const seen = new Set<string>()
+      const combined = [...(directRows ?? []), ...(splitRows ?? [])]
+        .filter(t => { if (seen.has(t.id)) return false; seen.add(t.id); return true })
+        .sort((a, b) => a.transaction_date.localeCompare(b.transaction_date))
+      setLinkedTxns(combined)
     } else {
       setLinkedTxns([])
     }
@@ -129,15 +190,38 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
   }, [loanId, clientId])
 
   useEffect(() => { load() }, [load])
+  useEffect(() => { setPayPage(0) }, [payments])
+  useEffect(() => { setLinkedPage(0) }, [linkedTxns])
 
-  const schedule = useMemo(() => loan ? generateAmortizationSchedule(loan) : [], [loan])
+  const schedule = useMemo(() => loan ? generateAmortizationSchedule(loan, disbursements) : [], [loan, disbursements])
+
+  // Date-based payment matching: a payment covers the period whose accrualEnd it falls within
+  // (plus a GRACE_DAYS window). This correctly handles the convention where a payment that
+  // arrives on 6/2 applies to the 5/1–5/31 period, not the 6/1–6/30 period.
+  const GRACE_DAYS = 15
+  const schedulePaymentMap = useMemo(() => {
+    const map = new Map<number, LoanPayment>() // period → payment
+    const usedIds = new Set<string>()
+    for (const row of schedule) {
+      const d = new Date(row.accrualEnd + 'T12:00:00')
+      d.setDate(d.getDate() + GRACE_DAYS)
+      const windowEnd = d.toISOString().slice(0, 10)
+      const match = payments.find(p =>
+        !usedIds.has(p.id) &&
+        p.payment_date >= row.accrualStart &&
+        p.payment_date <= windowEnd
+      )
+      if (match) { map.set(row.period, match); usedIds.add(match.id) }
+    }
+    return map
+  }, [schedule, payments])
 
   const outstanding = useMemo(() => {
     if (!loan) return 0
     if (isInformalDebt(loan.instrument_type) && linkedTxns.length > 0) {
       const repaid = linkedTxns
-        .filter(t => Number(t.amount) < 0)
-        .reduce((s, t) => s + Math.abs(Number(t.amount)), 0)
+        .filter(t => effectiveAmt(t, linkedAccount) < 0)
+        .reduce((s, t) => s + Math.abs(effectiveAmt(t, linkedAccount)), 0)
       return Math.max(0, loan.original_principal - repaid)
     }
     return calcOutstandingBalance(loan, payments, disbursements)
@@ -148,16 +232,23 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
   const totalFeesPaid = payments.reduce((s, p) => s + p.fees_amount, 0)
   const isPaidOff = outstanding <= 0.01
 
-  // Current period = number of payments recorded
-  const currentPeriodIdx = payments.length  // 0-indexed; this is the NEXT period to be paid
+  // Index into schedule[] of the first period that has no matched payment (= next to pay)
+  const currentPeriodIdx = useMemo(() => {
+    for (let i = 0; i < schedule.length; i++) {
+      if (!schedulePaymentMap.has(schedule[i].period)) return i
+    }
+    return schedule.length
+  }, [schedule, schedulePaymentMap])
+
+  useEffect(() => {
+    if (!showFullSchedule) setSchedPage(Math.floor(currentPeriodIdx / 12))
+  }, [schedule.length, showFullSchedule]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Amortization rows to display
   const visibleSchedule = useMemo(() => {
     if (showFullSchedule) return schedule
-    const start = Math.max(0, currentPeriodIdx - 2)
-    const end = Math.min(schedule.length, currentPeriodIdx + 12)
-    return schedule.slice(start, end)
-  }, [schedule, showFullSchedule, currentPeriodIdx])
+    return schedule.slice((schedPage * 12), (schedPage + 1) * 12)
+  }, [schedule, showFullSchedule, schedPage])
 
   // Next payment from schedule
   const nextScheduledRow: AmortizationRow | undefined = schedule[currentPeriodIdx]
@@ -357,7 +448,7 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
     setSaving(true)
     try {
       const useSchedule = hasFixedSchedule(loan.instrument_type ?? 'term_loan')
-      let nextPeriod = payments.length  // 0-indexed; index into schedule[]
+      let nextPeriod = currentPeriodIdx  // first unmatched schedule row
 
       for (const t of toImport) {
         const total = Math.abs(Number(t.amount))
@@ -467,6 +558,8 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
                 <span>Holdback: <strong style={{ color: D.charcoal }}>{(loan.holdback_pct * 100).toFixed(1)}%</strong></span>
               )}
             </>
+          ) : usesFlatFee(loan.instrument_type ?? 'term_loan') ? (
+            <span>Total Fee: <strong style={{ color: D.charcoal }}>{loan.total_fee != null ? `$${loan.total_fee.toLocaleString()}` : '—'}</strong></span>
           ) : (
             <span>Rate: <strong style={{ color: D.charcoal }}>{loan.interest_rate != null ? `${(loan.interest_rate * 100).toFixed(2)}% APR` : '—'}</strong></span>
           )}
@@ -666,7 +759,7 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
               <thead>
                 <tr style={{ background: D.page }}>
-                  {['#', 'Date', 'Total Paid', 'Principal', 'Interest', 'Fee', 'Balance', 'Bank Transaction', 'Notes', ''].map(h => (
+                  {['#', 'Date', 'Total Paid', 'Principal', 'Interest', 'Fee', 'Balance', 'Bank Transaction', ''].map(h => (
                     <th key={h} style={{
                       padding: '8px 12px', textAlign: h === '' ? 'right' : h === '#' ? 'center' : 'left',
                       fontSize: 10.5, fontWeight: 700, color: D.muted, textTransform: 'uppercase',
@@ -676,9 +769,9 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
                 </tr>
               </thead>
               <tbody>
-                {paymentRows.map((p, i) => (
-                  <tr key={p.id} style={{ borderBottom: i < paymentRows.length - 1 ? `1px solid ${D.border}` : 'none' }}>
-                    <td style={{ padding: '8px 12px', textAlign: 'center', color: D.muted, fontSize: 11.5, width: 36 }}>{i + 1}</td>
+                {paymentRows.slice((payPage * 12), (payPage + 1) * 12).map((p, i, arr) => (
+                  <tr key={p.id} style={{ borderBottom: i < arr.length - 1 ? `1px solid ${D.border}` : 'none' }}>
+                    <td style={{ padding: '8px 12px', textAlign: 'center', color: D.muted, fontSize: 11.5, width: 36 }}>{(payPage * 12) + i + 1}</td>
                     <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{fmtDate(p.payment_date)}</td>
                     <td style={{ padding: '8px 12px', fontWeight: 600 }}>{fmt(p.total_amount)}</td>
                     <td style={{ padding: '8px 12px', color: D.green }}>{fmt(p.principal_amount)}</td>
@@ -697,9 +790,6 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
                         )
                       })()}
                     </td>
-                    <td style={{ padding: '8px 12px', color: D.muted, fontSize: 11.5, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {p.notes || '—'}
-                    </td>
                     <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }} className="no-print">
                       <button onClick={() => openEditPayment(p)} style={{ background: 'none', border: 'none', color: D.steel, fontSize: 11, cursor: 'pointer', marginRight: 6 }}>Edit</button>
                       <button onClick={() => deletePayment(p.id)} style={{ background: 'none', border: 'none', color: D.red, fontSize: 11, cursor: 'pointer' }}>Delete</button>
@@ -708,6 +798,7 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
                 ))}
               </tbody>
             </table>
+            <Pager page={payPage} total={paymentRows.length} perPage={12} onChange={setPayPage} />
           </div>
         )}
       </section>
@@ -729,12 +820,13 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
           ) : (() => {
             let runBal = loan.original_principal
             const rows = linkedTxns.map(t => {
-              const amt = Number(t.amount)
+              const amt = effectiveAmt(t, linkedAccount)
               if (amt < 0) runBal = Math.max(0, Math.round((runBal + amt) * 100) / 100)
               return { ...t, balance: runBal }
             })
-            const totalIn  = linkedTxns.filter(t => Number(t.amount) > 0).reduce((s, t) => s + Number(t.amount), 0)
-            const totalOut = linkedTxns.filter(t => Number(t.amount) < 0).reduce((s, t) => s + Math.abs(Number(t.amount)), 0)
+            const pageRows = rows.slice((linkedPage * 12), (linkedPage + 1) * 12)
+            const totalIn  = linkedTxns.filter(t => effectiveAmt(t, linkedAccount) > 0).reduce((s, t) => s + effectiveAmt(t, linkedAccount), 0)
+            const totalOut = linkedTxns.filter(t => effectiveAmt(t, linkedAccount) < 0).reduce((s, t) => s + Math.abs(effectiveAmt(t, linkedAccount)), 0)
             return (
               <>
                 <div style={{ display: 'flex', gap: 12, marginBottom: 10 }}>
@@ -752,24 +844,24 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                     <thead>
                       <tr style={{ background: D.page }}>
-                        {['Date', 'Description', 'Amount', 'Balance'].map(h => (
-                          <th key={h} style={{ padding: '8px 12px', textAlign: ['Amount', 'Balance'].includes(h) ? 'right' : 'left', fontSize: 10.5, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: `1px solid ${D.border}` }}>{h}</th>
+                        {['Date', 'Description', 'Amount'].map(h => (
+                          <th key={h} style={{ padding: '8px 12px', textAlign: h === 'Amount' ? 'right' : 'left', fontSize: 10.5, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: `1px solid ${D.border}` }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map((t, i) => (
-                        <tr key={t.id} style={{ borderBottom: i < rows.length - 1 ? `1px solid ${D.border}` : 'none' }}>
+                      {pageRows.map((t, i) => (
+                        <tr key={t.id} style={{ borderBottom: i < pageRows.length - 1 ? `1px solid ${D.border}` : 'none' }}>
                           <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{fmtDate(t.transaction_date)}</td>
                           <td style={{ padding: '8px 12px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description}</td>
-                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600, color: Number(t.amount) < 0 ? D.green : D.charcoal }}>
-                            {Number(t.amount) < 0 ? fmt(Math.abs(Number(t.amount))) : `+${fmt(Number(t.amount))}`}
+                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600, color: effectiveAmt(t, linkedAccount) < 0 ? D.green : D.charcoal }}>
+                            {effectiveAmt(t, linkedAccount) < 0 ? fmt(Math.abs(effectiveAmt(t, linkedAccount))) : `+${fmt(effectiveAmt(t, linkedAccount))}`}
                           </td>
-                          <td style={{ padding: '8px 12px', textAlign: 'right', color: D.muted }}>{fmt(t.balance)}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                  <Pager page={linkedPage} total={rows.length} perPage={12} onChange={setLinkedPage} />
                 </div>
               </>
             )
@@ -783,7 +875,7 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
           <h2 style={{ fontSize: 14, fontWeight: 700, color: D.charcoal, margin: 0 }}>
             {usesFactorRate(loan.instrument_type ?? 'term_loan') ? 'Repayment Schedule (Estimated)' : 'Amortization Schedule'}
             <span style={{ fontSize: 11, fontWeight: 400, color: D.muted, marginLeft: 8 }}>
-              ({schedule.length} periods{loan.term_months > 0 ? ` · ${loan.term_months} months` : ''})
+              ({schedule.filter(r => !r.isStub).length} periods{loan.term_months > 0 ? ` · ${loan.term_months} months` : ''})
             </span>
           </h2>
           <button className="no-print" onClick={() => setShowFullSchedule(v => !v)} style={{
@@ -798,10 +890,10 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ background: D.page }}>
-                {['#', 'Date', 'Payment', 'Principal', costLabel(loan.instrument_type ?? 'term_loan'), 'Balance', 'Bank Transaction'].map(h => (
+                {['#', 'Start', 'End', 'Payment Date', 'Payment', 'Principal', costLabel(loan.instrument_type ?? 'term_loan'), 'Balance', 'Bank Transaction'].map(h => (
                   <th key={h} style={{
                     padding: '8px 12px',
-                    textAlign: h === '#' ? 'center' : (h === 'Date' || h === 'Bank Transaction') ? 'left' : 'right',
+                    textAlign: h === '#' ? 'center' : (h === 'Start' || h === 'End' || h === 'Payment Date' || h === 'Bank Transaction') ? 'left' : 'right',
                     fontSize: 10.5, fontWeight: 700, color: D.muted, textTransform: 'uppercase',
                     letterSpacing: '0.5px', borderBottom: `1px solid ${D.border}`,
                   }}>{h}</th>
@@ -810,8 +902,30 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
             </thead>
             <tbody>
               {visibleSchedule.map(row => {
-                const isCurrent = row.period === currentPeriodIdx + 1
-                const isPaid = row.period <= payments.length
+                // Stub row — interest collected with the first regular payment
+                if (row.isStub) {
+                  const stubPay = schedulePaymentMap.get(0) ?? null
+                  const stubTxn = stubPay?.transaction_id ? paymentTxns[stubPay.transaction_id] : null
+                  return (
+                    <tr key="stub" style={{ borderBottom: `1px solid ${D.border}`, background: `${D.gold}0E` }}>
+                      <td style={{ padding: '7px 12px', textAlign: 'center', color: D.gold, fontWeight: 700 }}>0</td>
+                      <td style={{ padding: '7px 12px', color: D.charcoal }}>{fmtDate(row.accrualStart)}</td>
+                      <td style={{ padding: '7px 12px', color: D.charcoal }}>{fmtDate(row.accrualEnd)}</td>
+                      <td style={{ padding: '7px 12px', color: D.charcoal }}>{fmtDate(row.date)}</td>
+                      <td style={{ padding: '7px 12px', textAlign: 'right', color: D.charcoal }}>{fmt(row.payment)}</td>
+                      <td style={{ padding: '7px 12px', textAlign: 'right', color: D.muted }}>—</td>
+                      <td style={{ padding: '7px 12px', textAlign: 'right', color: D.red }}>{fmt(row.interest)}</td>
+                      <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 500, color: D.charcoal }}>{fmt(row.balance)}</td>
+                      <td style={{ padding: '7px 12px', fontSize: 11.5, maxWidth: 220 }}>
+                        <SchedTxnCell txn={stubTxn} pay={stubPay} onEdit={() => { if (stubPay) openEditPayment(stubPay) }} label="30/360 odd-day interest" />
+                      </td>
+                    </tr>
+                  )
+                }
+                const pay = schedulePaymentMap.get(row.period) ?? null
+                const isPaid = !!pay
+                const isCurrent = !isPaid && schedule[currentPeriodIdx]?.period === row.period
+                const t = pay?.transaction_id ? paymentTxns[pay.transaction_id] : null
                 return (
                   <tr key={row.period} style={{
                     borderBottom: `1px solid ${D.border}`,
@@ -821,6 +935,12 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
                       {isPaid ? '✓' : row.period}
                     </td>
                     <td style={{ padding: '7px 12px', color: isPaid ? D.muted : D.charcoal, textDecoration: isPaid ? 'line-through' : 'none' }}>
+                      {fmtDate(row.accrualStart)}
+                    </td>
+                    <td style={{ padding: '7px 12px', color: isPaid ? D.muted : D.charcoal, textDecoration: isPaid ? 'line-through' : 'none' }}>
+                      {fmtDate(row.accrualEnd)}
+                    </td>
+                    <td style={{ padding: '7px 12px', color: isPaid ? D.muted : D.charcoal, textDecoration: isPaid ? 'line-through' : 'none' }}>
                       {fmtDate(row.date)}
                     </td>
                     <td style={{ padding: '7px 12px', textAlign: 'right', color: isPaid ? D.muted : D.charcoal }}>{fmt(row.payment)}</td>
@@ -828,30 +948,14 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
                     <td style={{ padding: '7px 12px', textAlign: 'right', color: isPaid ? D.muted : D.red }}>{fmt(row.interest)}</td>
                     <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 500, color: isPaid ? D.muted : D.charcoal }}>{fmt(row.balance)}</td>
                     <td style={{ padding: '7px 12px', fontSize: 11.5, maxWidth: 220 }}>
-                      {(() => {
-                        const pay = isPaid ? payments[row.period - 1] : null
-                        const t = pay?.transaction_id ? paymentTxns[pay.transaction_id] : null
-                        if (!t) return <span style={{ color: D.muted }}>—</span>
-                        return (
-                          <div>
-                            <div style={{ color: D.charcoal, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description}</div>
-                            <div style={{ color: D.muted, fontSize: 10.5 }}>{t.transaction_date} · {fmt(Math.abs(Number(t.amount)))}</div>
-                          </div>
-                        )
-                      })()}
+                      <SchedTxnCell txn={t} pay={pay} onEdit={() => { if (pay) openEditPayment(pay) }} />
                     </td>
                   </tr>
                 )
               })}
-              {!showFullSchedule && schedule.length > visibleSchedule.length && (
-                <tr>
-                  <td colSpan={6} style={{ padding: '8px 12px', textAlign: 'center', color: D.muted, fontSize: 11.5, fontStyle: 'italic' }}>
-                    … {schedule.length - visibleSchedule.length} more periods — click "Show All" to expand
-                  </td>
-                </tr>
-              )}
             </tbody>
           </table>
+          {!showFullSchedule && <Pager page={schedPage} total={schedule.length} perPage={12} onChange={setSchedPage} />}
         </div>
       </section>}
 
@@ -1069,6 +1173,8 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
         )}
         {usesFactorRate(loan.instrument_type ?? 'term_loan') ? (
           <span><span style={{ color: '#888', fontWeight: 600 }}>Factor Rate: </span><strong>{loan.factor_rate ?? '—'}x</strong></span>
+        ) : usesFlatFee(loan.instrument_type ?? 'term_loan') ? (
+          <span><span style={{ color: '#888', fontWeight: 600 }}>Total Fee: </span><strong>{loan.total_fee != null ? `$${loan.total_fee.toLocaleString()}` : '—'}</strong></span>
         ) : (
           <span><span style={{ color: '#888', fontWeight: 600 }}>Rate: </span><strong>{loan.interest_rate != null ? `${(loan.interest_rate * 100).toFixed(2)}% APR` : '—'}</strong></span>
         )}

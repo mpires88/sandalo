@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import { PL_SECTIONS, BS_SECTIONS, mergeAccounts, type MergedAccount } from '@/lib/chartOfAccounts'
 import { CLIENT_ID } from '@/constants'
+import { type FinancialAccount, accountSection } from '@/components/FinancialAccounts'
 
 const D = {
   sage: '#2C5F52', gold: '#C8A96E', charcoal: '#4A4A3F',
@@ -43,6 +44,8 @@ export default function FinancialReports() {
   const [accounts,  setAccounts]  = useState<MergedAccount[]>([])
   const [allMonths, setAllMonths] = useState<string[]>([])  // sorted unique YYYY-MM keys
   const [loading,   setLoading]   = useState(true)
+  const [finAccounts,  setFinAccounts]  = useState<FinancialAccount[]>([])
+  const [acctMonthly,  setAcctMonthly]  = useState<Record<string, Record<string, number>>>({})
 
   const [mode,       setMode]       = useState<ReportMode>('pl')
   const [periodMode, setPeriodMode] = useState<PeriodMode>('monthly')
@@ -64,16 +67,22 @@ export default function FinancialReports() {
 
       setAccounts(mergeAccounts(catRes.data ?? []))
 
+      const { data: faData } = await supabase
+        .from('financial_accounts')
+        .select('*')
+        .eq('client_id', CLIENT_ID)
+        .order('created_at')
+      setFinAccounts(faData ?? [])
+
       // Paginate transactions in batches of 1000 (Supabase default cap)
-      type TxnRow = { transaction_date: string; amount: string | number; account: string }
+      type TxnRow = { transaction_date: string; amount: string | number; account: string; source_account_id?: string | null }
       let allRows: TxnRow[] = []
       let offset = 0
       while (true) {
         const res = await supabase
           .from('bank_transactions')
-          .select('transaction_date, amount, account')
+          .select('transaction_date, amount, account, source_account_id')
           .eq('client_id', CLIENT_ID)
-          .not('account', 'is', null)
           .range(offset, offset + 999)
         const batch = (res.data ?? []) as TxnRow[]
         allRows = [...allRows, ...batch]
@@ -83,16 +92,25 @@ export default function FinancialReports() {
 
       // Aggregate by month for finest granularity; roll up to year/all-time on demand
       const monthly: Record<string, Record<string, number>> = {}
+      const acctMo: Record<string, Record<string, number>> = {}
       const monthSet = new Set<string>()
       for (const t of allRows) {
-        if (!t.account || !t.transaction_date) continue
+        if (!t.transaction_date) continue
         const mk = (t.transaction_date as string).slice(0, 7)
-        monthSet.add(mk)
         const amt = parseFloat(String(t.amount)) || 0
-        if (!monthly[t.account]) monthly[t.account] = {}
-        monthly[t.account][mk] = (monthly[t.account][mk] ?? 0) + amt
+        if (t.account) {
+          monthSet.add(mk)
+          if (!monthly[t.account]) monthly[t.account] = {}
+          monthly[t.account][mk] = (monthly[t.account][mk] ?? 0) + amt
+        }
+        if (t.source_account_id) {
+          monthSet.add(mk)
+          if (!acctMo[t.source_account_id]) acctMo[t.source_account_id] = {}
+          acctMo[t.source_account_id][mk] = (acctMo[t.source_account_id][mk] ?? 0) + amt
+        }
       }
       setRawTotals(monthly)
+      setAcctMonthly(acctMo)
       setAllMonths(Array.from(monthSet).sort())
     } finally {
       setLoading(false)
@@ -171,11 +189,14 @@ export default function FinancialReports() {
       .reduce((s, c) => s + accountTotal(c.name, section, key), 0)
   }
 
-  // Recursive sum for an account: if it has children sum them, otherwise return own dispAmt
+  // Recursive sum for an account: if it has children sum them, otherwise return own dispAmt.
+  // Also adds any financial accounts parented to this category.
   function accountTotal(name: string, section: string, key: string): number {
     const kids = (bySection[section] ?? []).filter(a => a.parent === name)
-    if (kids.length > 0) return kids.reduce((s, c) => s + accountTotal(c.name, section, key), 0)
-    return dispAmt(name, section, key)
+    const faKids = faChildrenOf(name)
+    const faContrib = faKids.reduce((s, a) => s + acctDispAmt(a, key), 0)
+    if (kids.length > 0) return kids.reduce((s, c) => s + accountTotal(c.name, section, key), 0) + faContrib
+    return dispAmt(name, section, key) + faContrib
   }
 
   // Sum of all top-level accounts in a section (parents display as sum of all descendants)
@@ -183,6 +204,58 @@ export default function FinancialReports() {
     return (bySection[section] ?? [])
       .filter(a => !a.parent)
       .reduce((s, a) => s + accountTotal(a.name, section, key), 0)
+  }
+
+  // ─── Financial account balance helpers ──────────────────────────────────────
+
+  function getAcctCumul(acctId: string, key: string): number {
+    const m = acctMonthly[acctId] ?? {}
+    return Object.entries(m).filter(([k]) => {
+      if (key === 'latest' || key === 'total') return true
+      if (key.length === 4) return k.slice(0, 4) <= key
+      return k <= key
+    }).reduce((s, [, v]) => s + v, 0)
+  }
+
+  function acctDispAmt(acct: FinancialAccount, key: string): number {
+    const raw = getAcctCumul(acct.id, key)
+    return raw * (accountSection(acct.account_type) === 'asset' ? 1 : -1)
+  }
+
+  function acctGroupTotal(accts: FinancialAccount[], key: string): number {
+    return accts.reduce((s, a) => s + acctDispAmt(a, key), 0)
+  }
+
+  function faChildrenOf(categoryName: string): FinancialAccount[] {
+    return finAccounts.filter(a => a.parent_category === categoryName)
+  }
+
+  function financialAccountRow(a: FinancialAccount, depth: number): React.ReactNode {
+    return (
+      <tr key={`fa-${a.id}`} style={{ borderBottom: `1px solid ${D.border}` }}>
+        <td style={{ ...stickyFirst(BG.card), padding: `6px ${hPad}px 6px ${hPad + depth * 18}px`, fontSize: 12.5, color: D.muted }}>
+          {a.name}{a.last_four ? ` ••••${a.last_four}` : ''}
+        </td>
+        {displayPeriods.map(k => amtCell(acctDispAmt(a, k), false, false, k === 'total'))}
+      </tr>
+    )
+  }
+
+  // Only unassigned financial accounts go into the default standalone sections
+  function financialAccountsSection(label: string, accts: FinancialAccount[]): React.ReactNode[] {
+    const unassigned = accts.filter(a => !a.parent_category)
+    if (unassigned.length === 0) return []
+    const rows: React.ReactNode[] = [sectionHeaderRow(label)]
+    for (const a of unassigned) rows.push(financialAccountRow(a, 0))
+    rows.push(
+      <tr key={`fat-${label}`} style={{ background: BG.sectionTotal, borderBottom: `2px solid ${D.border}` }}>
+        <td style={{ ...stickyFirst(BG.sectionTotal), padding: `6px ${hPad}px`, fontWeight: 700, fontSize: 12.5, color: D.charcoal }}>
+          Total {label}
+        </td>
+        {displayPeriods.map(k => amtCell(acctGroupTotal(unassigned, k), true, false, k === 'total'))}
+      </tr>
+    )
+    return rows
   }
 
   // ─── P&L summary values ──────────────────────────────────────────────────────
@@ -202,12 +275,16 @@ export default function FinancialReports() {
   }
 
   function bsSummary(key: string) {
+    // Assigned FAs are already included in sectionTotal via accountTotal.
+    // Only unassigned FAs need to be added separately.
+    const unassignedAssets  = finAccounts.filter(a => accountSection(a.account_type) === 'asset'      && !a.parent_category)
+    const unassignedLiabs   = finAccounts.filter(a => accountSection(a.account_type) === 'liability'  && !a.parent_category)
     const ca  = sectionTotal('Current Assets', key)
     const nca = sectionTotal('Non-Current Assets', key)
-    const ta  = ca + nca
+    const ta  = ca + nca + acctGroupTotal(unassignedAssets, key)
     const cl  = sectionTotal('Current Liabilities', key)
     const ncl = sectionTotal('Non-Current Liabilities', key)
-    const tl  = cl + ncl
+    const tl  = cl + ncl + acctGroupTotal(unassignedLiabs, key)
     const eq  = sectionTotal('Equity', key)
     return { ca, nca, ta, cl, ncl, tl, eq, tle: tl + eq }
   }
@@ -380,12 +457,18 @@ export default function FinancialReports() {
 
     function renderAccount(a: MergedAccount, depth: number): void {
       const kids = accts.filter(c => c.parent === a.name)
-      if (kids.length > 0) {
+      const faKids = faChildrenOf(a.name)
+      const hasKids = kids.length > 0 || faKids.length > 0
+
+      if (hasKids) {
         const activeKids = kids.filter(c => hasAnyActivity(c.name, section))
-        if (activeKids.length === 0) return
+        if (activeKids.length === 0 && faKids.length === 0) return
         const isCollapsed = collapsed.has(a.name)
         rows.push(accountRow(a, section, depth, true, isCollapsed, () => toggleCollapsed(a.name)))
-        if (!isCollapsed) activeKids.forEach(c => renderAccount(c, depth + 1))
+        if (!isCollapsed) {
+          activeKids.forEach(c => renderAccount(c, depth + 1))
+          faKids.forEach(fa => rows.push(financialAccountRow(fa, depth + 1)))
+        }
       } else {
         if (!hasActivity(a.name, section)) return
         rows.push(accountRow(a, section, depth, false))
@@ -422,14 +505,18 @@ export default function FinancialReports() {
   // ─── Balance Sheet body ──────────────────────────────────────────────────────
 
   function bsRows(): React.ReactNode[] {
+    const assetAccts     = finAccounts.filter(a => accountSection(a.account_type) === 'asset')
+    const liabilityAccts = finAccounts.filter(a => accountSection(a.account_type) === 'liability')
     const s = displayPeriods.map(k => bsSummary(k))
     return [
       groupHeaderRow('Assets'),
+      ...financialAccountsSection('Bank Accounts', assetAccts),
       ...sectionRows('Current Assets'),
       ...sectionRows('Non-Current Assets'),
       summaryRow('Total Assets', s.map(x => x.ta)),
       spacerRow('s1'),
       groupHeaderRow('Liabilities'),
+      ...financialAccountsSection('Credit & Lines of Credit', liabilityAccts),
       ...sectionRows('Current Liabilities'),
       ...sectionRows('Non-Current Liabilities'),
       summaryRow('Total Liabilities', s.map(x => x.tl)),

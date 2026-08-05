@@ -42,3 +42,9 @@ next-env.d.ts
 
 # claude code
 .claude/
+
+# supabase CLI scratch
+supabase/.temp/
+
+# stray dev-server log with a mangled Windows path name
+*sandalo-dev.log

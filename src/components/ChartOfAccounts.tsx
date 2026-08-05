@@ -7,6 +7,7 @@ import {
   isPLSection, isBSSection, mergeAccounts,
   type MergedAccount,
 } from '@/lib/chartOfAccounts'
+import { type FinancialAccount, accountSection, ACCOUNT_TYPE_LABELS } from '@/components/FinancialAccounts'
 
 const T = {
   sage: '#2C5F52', gold: '#C8A96E', charcoal: '#4A4A3F',
@@ -15,6 +16,25 @@ const T = {
 }
 
 type DisplayRow = { account: MergedAccount; depth: number }
+type SectionRow  = { kind: 'coa'; account: MergedAccount; depth: number }
+                 | { kind: 'fa';  finAccount: FinancialAccount; depth: number }
+
+const FA_DEFAULT_SECTION: Record<'asset' | 'liability', string> = {
+  asset:     'Current Assets',
+  liability: 'Current Liabilities',
+}
+
+function mergeFARows(displayList: DisplayRow[], sectionFAs: FinancialAccount[]): SectionRow[] {
+  const result: SectionRow[] = []
+  for (const row of displayList) {
+    result.push({ kind: 'coa', ...row })
+    sectionFAs
+      .filter(fa => fa.parent_category === row.account.name)
+      .forEach(fa => result.push({ kind: 'fa', finAccount: fa, depth: row.depth + 1 }))
+  }
+  sectionFAs.filter(fa => !fa.parent_category).forEach(fa => result.push({ kind: 'fa', finAccount: fa, depth: 0 }))
+  return result
+}
 
 function buildDisplayList(sectionAccounts: MergedAccount[]): DisplayRow[] {
   const alpha = (a: MergedAccount, b: MergedAccount) => a.name.localeCompare(b.name)
@@ -55,8 +75,9 @@ function getAllDescendants(name: string, all: MergedAccount[]): MergedAccount[] 
 }
 
 export default function ChartOfAccounts({ clientId }: { clientId: string }) {
-  const [accounts,   setAccounts]   = useState<MergedAccount[]>([])
-  const [loading,    setLoading]    = useState(true)
+  const [accounts,     setAccounts]     = useState<MergedAccount[]>([])
+  const [finAccounts,  setFinAccounts]  = useState<FinancialAccount[]>([])
+  const [loading,      setLoading]      = useState(true)
   const [error,      setError]      = useState<string | null>(null)
   const [saving,     setSaving]     = useState(false)
   const [tab,        setTab]        = useState<'pl'|'bs'>('pl')
@@ -73,8 +94,11 @@ export default function ChartOfAccounts({ clientId }: { clientId: string }) {
   const load = useCallback(async () => {
     setLoading(true); setError(null)
     try {
-      const { data, error: err } = await supabase
-        .from('categories').select('name, sort_order, pl_section, parent').eq('client_id', clientId).order('sort_order')
+      const [{ data, error: err }, { data: faData }] = await Promise.all([
+        supabase.from('categories').select('name, sort_order, pl_section, parent').eq('client_id', clientId).order('sort_order'),
+        supabase.from('financial_accounts').select('*').eq('client_id', clientId).order('sort_order'),
+      ])
+      setFinAccounts(faData ?? [])
       if (err) { setError(err.message); return }
 
       const existingNames = new Set((data ?? []).map((r: { name: string }) => r.name))
@@ -163,12 +187,17 @@ export default function ChartOfAccounts({ clientId }: { clientId: string }) {
     const childNote = children.length ? ` Its ${children.length} sub-account(s) will become top-level.` : ''
     if (!confirm(`Remove "${name}"?${childNote} Transactions using this category will become uncategorized.`)) return
     setSaving(true)
-    const { error: err } = await supabase.from('categories').delete().eq('name', name)
+    const { error: err } = await supabase.from('categories').delete().eq('name', name).eq('client_id', clientId)
     if (err) { alert('Delete failed: ' + err.message); setSaving(false); return }
     // Promote direct children to their grandparent (or top-level)
     const grandparent = accounts.find(a => a.name === name)?.parent ?? null
-    await supabase.from('categories').update({ parent: grandparent }).eq('parent', name)
+    await supabase.from('categories').update({ parent: grandparent }).eq('parent', name).eq('client_id', clientId)
     await load(); setSaving(false)
+  }
+
+  const changeFAParent = async (fa: FinancialAccount, parentName: string | null) => {
+    setFinAccounts(prev => prev.map(a => a.id === fa.id ? { ...a, parent_category: parentName } : a))
+    await supabase.from('financial_accounts').update({ parent_category: parentName }).eq('id', fa.id).eq('client_id', clientId)
   }
 
   if (loading) return (
@@ -185,7 +214,15 @@ export default function ChartOfAccounts({ clientId }: { clientId: string }) {
   }, {} as Record<string, MergedAccount[]>)
 
   const plCount = accounts.filter(a => isPLSection(a.pl_section)).length
-  const bsCount = accounts.filter(a => isBSSection(a.pl_section)).length
+  const bsCount = accounts.filter(a => isBSSection(a.pl_section)).length + finAccounts.length
+
+  // Parent options for a financial account: CoA accounts in the matching BS sections
+  function faParentOptions(fa: FinancialAccount): DisplayRow[] {
+    const validSections = accountSection(fa.account_type) === 'asset'
+      ? ['Current Assets', 'Non-Current Assets']
+      : ['Current Liabilities', 'Non-Current Liabilities']
+    return buildDisplayList(accounts.filter(a => validSections.includes(a.pl_section)))
+  }
 
   return (
     <div style={{ background: T.page, minHeight: '100%' }}>
@@ -239,6 +276,15 @@ export default function ChartOfAccounts({ clientId }: { clientId: string }) {
           const sectionAccounts = grouped[section] ?? []
           const displayList     = buildDisplayList(sectionAccounts)
 
+          // Financial accounts that belong in this section
+          const sectionFAs = tab === 'bs' ? finAccounts.filter(fa => {
+            if (!fa.parent_category) return section === FA_DEFAULT_SECTION[accountSection(fa.account_type)]
+            const parentCoA = accounts.find(a => a.name === fa.parent_category)
+            return parentCoA?.pl_section === section
+          }) : []
+
+          const mergedList = tab === 'bs' ? mergeFARows(displayList, sectionFAs) : displayList.map(r => ({ kind: 'coa' as const, ...r }))
+
           // Build indented option list for parent dropdowns, excluding a given name
           const parentOptionRows = (excludeName?: string) =>
             displayList.filter(r => r.account.name !== excludeName)
@@ -272,13 +318,59 @@ export default function ChartOfAccounts({ clientId }: { clientId: string }) {
                 </div>
               )}
 
-              {displayList.length === 0 && (
+              {mergedList.length === 0 && (
                 <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 14px 10px' }}>No accounts in this section.</p>
               )}
 
               <table style={s.table}>
                 <tbody>
-                  {displayList.map(({ account: acc, depth }) => {
+                  {mergedList.map(row => {
+                    if (row.kind === 'fa') {
+                      const { finAccount: fa, depth } = row
+                      const isAsset = accountSection(fa.account_type) === 'asset'
+                      const badgeColor = isAsset ? '#16a34a' : '#dc2626'
+                      const badgeBg    = isAsset ? '#dcfce7' : '#fee2e2'
+                      return (
+                        <tr key={`fa-${fa.id}`} style={s.row}
+                          onMouseEnter={e => (e.currentTarget.style.background = T.page)}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        >
+                          <td style={{ ...s.td, width: '99%' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', paddingLeft: depth * 20 }}>
+                              {depth > 0 && <span style={{ color: '#c0bbb4', marginRight: 6, fontSize: 11 }}>└</span>}
+                              <span style={{ fontSize: 12, color: T.charcoal }}>{fa.name}{fa.last_four ? ` ••••${fa.last_four}` : ''}</span>
+                              <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 500, color: badgeColor, background: badgeBg, borderRadius: 4, padding: '1px 6px' }}>
+                                {ACCOUNT_TYPE_LABELS[fa.account_type]}
+                              </span>
+                            </div>
+                          </td>
+                          <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
+                            <select
+                              style={s.sectionSelect}
+                              value={fa.parent_category ?? ''}
+                              onChange={e => changeFAParent(fa, e.target.value || null)}
+                              title="Nest under a chart-of-accounts category"
+                            >
+                              <option value="">— Top Level —</option>
+                              {faParentOptions(fa).map(r => (
+                                <option key={r.account.name} value={r.account.name}>
+                                  {'  '.repeat(r.depth)}{r.depth > 0 ? '└ ' : ''}{r.account.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
+                            <span title="Managed on the Accounts page — cannot be deleted here" style={{ ...s.iconBtn, cursor: 'default', color: '#D9D4C8', display: 'inline-block' }}>
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+                                <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                              </svg>
+                            </span>
+                          </td>
+                        </tr>
+                      )
+                    }
+
+                    const { account: acc, depth } = row
                     const isChild   = depth > 0
                     const isEditing = editKey === acc.name
 

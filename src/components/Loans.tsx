@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 import {
   type Loan, type LoanFrequency, type LoanType, type InstrumentType, type LoanDisbursement,
-  INSTRUMENT_LABELS, usesInterestRate, usesFactorRate, hasFixedSchedule, hasLoanType, isInformalDebt,
+  INSTRUMENT_LABELS, usesInterestRate, usesFactorRate, usesFlatFee, hasFixedSchedule, hasLoanType, isInformalDebt,
   calcOutstandingBalance, calcPaymentAmount,
 } from '@/lib/loans'
 
@@ -32,6 +32,7 @@ interface LoanForm {
   loan_type: LoanType
   original_principal: string
   interest_rate: string       // as %, e.g. "6.5"
+  total_fee: string           // flat fee note: dollar amount, e.g. "30000"
   factor_rate: string         // e.g. "1.35"
   holdback_pct: string        // as %, e.g. "12"
   start_date: string
@@ -40,16 +41,17 @@ interface LoanForm {
   payment_amount: string
   default_rate: string         // as %, e.g. "2.5"
   notes: string
+  linked_account_id: string
 }
 
 const BLANK: LoanForm = {
   name: '', lender: '', instrument_type: 'term_loan', loan_type: 'amortizing',
-  original_principal: '', interest_rate: '', factor_rate: '', holdback_pct: '',
+  original_principal: '', interest_rate: '', total_fee: '', factor_rate: '', holdback_pct: '',
   start_date: '', term_months: '', payment_frequency: 'monthly', payment_amount: '',
-  default_rate: '', notes: '',
+  default_rate: '', notes: '', linked_account_id: '',
 }
 
-interface LoanWithBalance extends Loan { outstanding: number }
+interface LoanWithBalance extends Loan { outstanding: number; linkedAccount?: string }
 
 export default function Loans({ clientId }: { clientId: string }) {
   const [loans, setLoans] = useState<LoanWithBalance[]>([])
@@ -59,6 +61,7 @@ export default function Loans({ clientId }: { clientId: string }) {
   const [form, setForm] = useState<LoanForm>({ ...BLANK })
   const [saving, setSaving] = useState(false)
   const [formErr, setFormErr] = useState('')
+  const [availableAccounts, setAvailableAccounts] = useState<{ id: string; name: string; pl_section: string }[]>([])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -93,6 +96,15 @@ export default function Loans({ clientId }: { clientId: string }) {
     const { data: disbRows } = await supabase
       .from('loan_disbursements').select('*').eq('client_id', clientId)
 
+    const { data: linkedCats } = await supabase
+      .from('categories').select('loan_id, name')
+      .eq('client_id', clientId).filter('loan_id', 'not.is', null)
+
+    const linkedAccountMap: Record<string, string> = {}
+    for (const c of linkedCats ?? []) {
+      if (c.loan_id) linkedAccountMap[c.loan_id] = c.name
+    }
+
     const groupedPay: Record<string, typeof payRows> = {}
     for (const p of payRows ?? []) {
       if (!groupedPay[p.loan_id]) groupedPay[p.loan_id] = []
@@ -108,11 +120,35 @@ export default function Loans({ clientId }: { clientId: string }) {
     setLoans((loanRows ?? []).map((l: Loan) => ({
       ...l,
       outstanding: calcOutstandingBalance(l, groupedPay[l.id] ?? [], groupedDisb[l.id] ?? []),
+      linkedAccount: linkedAccountMap[l.id],
     })))
     setLoading(false)
   }, [clientId])
 
   useEffect(() => { load() }, [load])
+
+  // Load unlinked liability accounts (+ currently linked one if editing) whenever the modal opens
+  useEffect(() => {
+    if (!modal) return
+    const loanId = form.id
+    const run = async () => {
+      const { data } = await supabase
+        .from('categories')
+        .select('id, name, pl_section')
+        .eq('client_id', clientId)
+        .in('pl_section', ['Current Liabilities', 'Non-Current Liabilities'])
+        .or(loanId ? `loan_id.is.null,loan_id.eq.${loanId}` : 'loan_id.is.null')
+        .order('pl_section').order('name')
+      setAvailableAccounts(data ?? [])
+
+      if (loanId) {
+        const { data: linked } = await supabase
+          .from('categories').select('id').eq('loan_id', loanId).eq('client_id', clientId).maybeSingle()
+        if (linked) setForm(f => ({ ...f, linked_account_id: linked.id }))
+      }
+    }
+    run()
+  }, [modal]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function openAdd() {
     setForm({ ...BLANK, start_date: new Date().toISOString().slice(0, 10) })
@@ -131,6 +167,7 @@ export default function Loans({ clientId }: { clientId: string }) {
       interest_rate: l.interest_rate != null
         ? String((l.interest_rate * 100).toFixed(4).replace(/\.?0+$/, ''))
         : '',
+      total_fee: l.total_fee != null ? String(l.total_fee) : '',
       factor_rate: l.factor_rate != null ? String(l.factor_rate) : '',
       holdback_pct: l.holdback_pct != null
         ? String((l.holdback_pct * 100).toFixed(2).replace(/\.?0+$/, ''))
@@ -143,6 +180,7 @@ export default function Loans({ clientId }: { clientId: string }) {
         ? String((l.default_rate * 100).toFixed(4).replace(/\.?0+$/, ''))
         : '',
       notes: l.notes ?? '',
+      linked_account_id: '',  // populated asynchronously by the modal useEffect
     })
     setFormErr('')
     setModal(true)
@@ -150,7 +188,8 @@ export default function Loans({ clientId }: { clientId: string }) {
 
   const itype = form.instrument_type
   const showInterestRate = usesInterestRate(itype)
-  const showFactorRate = usesFactorRate(itype)
+  const showTotalFee     = usesFlatFee(itype)
+  const showFactorRate   = usesFactorRate(itype)
   const showScheduleFields = hasFixedSchedule(itype)
   const showLoanType = hasLoanType(itype)
   const isInformal = isInformalDebt(itype)
@@ -176,6 +215,9 @@ export default function Loans({ clientId }: { clientId: string }) {
     if (showFactorRate) {
       const fr = parseFloat(form.factor_rate)
       if (isNaN(fr) || fr <= 1) { setFormErr('Factor rate must be > 1.0 (e.g. 1.35)'); return }
+    } else if (showTotalFee) {
+      const tf = parseFloat(form.total_fee)
+      if (isNaN(tf) || tf < 0) { setFormErr('Total fee must be ≥ 0'); return }
     } else if (showInterestRate && !isInformal) {
       const r = parseFloat(form.interest_rate)
       if (isNaN(r) || r < 0) { setFormErr('Interest rate must be ≥ 0'); return }
@@ -198,8 +240,9 @@ export default function Loans({ clientId }: { clientId: string }) {
       payment_frequency: form.payment_frequency,
       payment_amount: isNaN(pmt) ? 0 : pmt,
       notes: form.notes.trim() || undefined,
-      // Conditional rate fields
+      // Conditional rate/fee fields
       interest_rate: showInterestRate ? parseFloat(form.interest_rate) / 100 : undefined,
+      total_fee: showTotalFee ? parseFloat(form.total_fee) || undefined : undefined,
       factor_rate: showFactorRate ? parseFloat(form.factor_rate) : undefined,
       holdback_pct: showFactorRate && form.holdback_pct
         ? parseFloat(form.holdback_pct) / 100
@@ -215,8 +258,17 @@ export default function Loans({ clientId }: { clientId: string }) {
       loanId = inserted?.id ?? ''
     }
 
+    // Handle chart-of-accounts linking
+    if (loanId && form.linked_account_id) {
+      // User chose an existing account — link it and unlink any previously linked different account
+      await supabase.from('categories')
+        .update({ loan_id: null })
+        .eq('loan_id', loanId).eq('client_id', clientId).neq('id', form.linked_account_id)
+      await supabase.from('categories')
+        .update({ loan_id: loanId })
+        .eq('id', form.linked_account_id).eq('client_id', clientId)
+    } else if (loanId) {
     // Auto-create / update the linked liability account in chart of accounts
-    if (loanId) {
       const section = (showScheduleFields ? t : 0) > 12 ? 'Non-Current Liabilities' : 'Current Liabilities'
       const acctName = form.name.trim()
 
@@ -341,17 +393,25 @@ export default function Loans({ clientId }: { clientId: string }) {
                 const pct = l.original_principal > 0 ? (l.outstanding / l.original_principal) * 100 : 0
                 const isPaidOff = l.outstanding <= 0.01
                 const isMca = usesFactorRate(l.instrument_type ?? 'term_loan')
+                const isFlatFee = usesFlatFee(l.instrument_type ?? 'term_loan')
                 const rateDisplay = isMca
                   ? (l.factor_rate ? `${l.factor_rate}x` : '—')
-                  : (l.interest_rate != null ? `${(l.interest_rate * 100).toFixed(2)}%` : '—')
+                  : isFlatFee
+                    ? (l.total_fee != null ? `$${l.total_fee.toLocaleString()} fee` : '—')
+                    : (l.interest_rate != null ? `${(l.interest_rate * 100).toFixed(2)}%` : '—')
                 return (
                   <tr key={l.id} style={{ borderBottom: i < loans.length - 1 ? `1px solid ${D.border}` : 'none' }}>
                     <td style={{ padding: '10px 12px' }}>
-                      <Link href={`/loans/${l.id}`} style={{ color: D.sage, fontWeight: 600, textDecoration: 'none', fontSize: 13 }}>
-                        {l.name}
-                      </Link>
-                      {isPaidOff && (
-                        <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, background: D.green, color: '#fff', padding: '1px 5px', borderRadius: 3 }}>PAID</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Link href={`/loans/${l.id}`} style={{ color: D.sage, fontWeight: 600, textDecoration: 'none', fontSize: 13 }}>
+                          {l.name}
+                        </Link>
+                        {isPaidOff && (
+                          <span style={{ fontSize: 9, fontWeight: 700, background: D.green, color: '#fff', padding: '1px 5px', borderRadius: 3 }}>PAID</span>
+                        )}
+                      </div>
+                      {l.linkedAccount && (
+                        <div style={{ fontSize: 10.5, color: D.muted, marginTop: 2 }}>{l.linkedAccount}</div>
                       )}
                     </td>
                     <td style={{ padding: '10px 12px', color: D.charcoal }}>{l.lender || '—'}</td>
@@ -436,7 +496,7 @@ export default function Loans({ clientId }: { clientId: string }) {
                 )}
                 {itype === 'flat_fee' && (
                   <div style={{ marginTop: 8, fontSize: 11, color: D.muted, background: D.page, padding: '6px 10px', borderRadius: 5 }}>
-                    Pre-computed flat fee note — the finance charge is fixed at signing, not accruing interest. Enter the monthly fee rate as APR (e.g. 2.5%/mo = 30%). Schedule shows fee-only payments with principal due at end.
+                    Pre-computed flat fee note — the finance charge is a fixed dollar amount agreed at signing. Fee payments are spread evenly; principal is due as a balloon on the last payment.
                   </div>
                 )}
               </div>
@@ -460,6 +520,16 @@ export default function Loans({ clientId }: { clientId: string }) {
                   <input style={inp} type="number" min="0" step="0.001" placeholder="e.g. 6.5"
                     value={form.interest_rate}
                     onChange={e => setForm(f => ({ ...f, interest_rate: e.target.value }))} />
+                </div>
+              )}
+
+              {/* Flat fee note: total fixed finance charge */}
+              {showTotalFee && (
+                <div>
+                  <label style={lbl}>Total Fee ($)</label>
+                  <input style={inp} type="number" min="0" step="0.01" placeholder="e.g. 30000"
+                    value={form.total_fee}
+                    onChange={e => setForm(f => ({ ...f, total_fee: e.target.value }))} />
                 </div>
               )}
 
@@ -565,6 +635,22 @@ export default function Loans({ clientId }: { clientId: string }) {
                 <textarea style={{ ...inp, height: 56, resize: 'vertical' } as React.CSSProperties}
                   value={form.notes}
                   onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
+              </div>
+
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label style={lbl}>Liability Account</label>
+                <select style={inp} value={form.linked_account_id}
+                  onChange={e => setForm(f => ({ ...f, linked_account_id: e.target.value }))}>
+                  <option value="">— Auto-create from loan name —</option>
+                  {availableAccounts.map(a => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+                <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>
+                  {availableAccounts.length === 0
+                    ? 'No unlinked liability accounts — a new one will be created.'
+                    : 'Select an existing unlinked account, or leave blank to auto-create one named after this loan.'}
+                </div>
               </div>
             </div>
 
