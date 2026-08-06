@@ -16,13 +16,13 @@ function adminClient() {
   )
 }
 
-// Caller must be a signed-in admin/super_admin
+// Caller must be a signed-in, active admin/super_admin
 async function requireAdmin() {
   const supabase = await createSupabaseServerClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return false
-  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).single()
-  return !!profile && ['super_admin', 'admin'].includes(profile.role)
+  const { data: profile } = await supabase.from('profiles').select('role, is_active').eq('id', user.id).single()
+  return !!profile && profile.is_active && ['super_admin', 'admin'].includes(profile.role)
 }
 
 // Call a Square endpoint with the given token; returns { ok, status, json }
@@ -56,7 +56,7 @@ function publicShape(row: Record<string, unknown> | null, extra: Record<string, 
 
 // GET — current connection status (revalidates the stored token against Square)
 export async function GET() {
-  if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
+  if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const db = adminClient()
   const { data: row } = await db.from('square_connections').select('*').eq('client_id', CLIENT_ID).maybeSingle()
   if (!row) return NextResponse.json({ connected: false })
@@ -68,7 +68,7 @@ export async function GET() {
 
 // POST — connect: validate a pasted token, then store it
 export async function POST(request: Request) {
-  if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
+  if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const { environment, access_token, location_id } = await request.json()
 
   if (!['sandbox', 'production'].includes(environment)) return NextResponse.json({ error: 'Invalid environment' }, { status: 400 })
@@ -115,7 +115,7 @@ export async function POST(request: Request) {
 
 // PATCH — change the selected location without re-entering the token
 export async function PATCH(request: Request) {
-  if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
+  if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const { location_id } = await request.json()
   const db = adminClient()
   const { data: row } = await db.from('square_connections').select('*').eq('client_id', CLIENT_ID).maybeSingle()
@@ -133,7 +133,7 @@ export async function PATCH(request: Request) {
 
 // DELETE — disconnect
 export async function DELETE() {
-  if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
+  if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const db = adminClient()
   await db.from('square_connections').delete().eq('client_id', CLIENT_ID)
   return NextResponse.json({ connected: false })

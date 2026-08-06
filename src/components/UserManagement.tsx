@@ -50,7 +50,7 @@ export default function UserManagement() {
   const [fName,     setFName]     = useState('')
   const [fEmail,    setFEmail]    = useState('')
   const [fPassword, setFPassword] = useState('')
-  const [fRole,     setFRole]     = useState<'admin' | 'user'>('user')
+  const [fRole,     setFRole]     = useState<Profile['role']>('user')
   const [fGroups,   setFGroups]   = useState<Set<string>>(new Set())
   const [fStaffId,  setFStaffId]  = useState<string>('')
 
@@ -74,7 +74,7 @@ export default function UserManagement() {
 
   function openEdit(p: Profile) {
     setFName(p.name); setFEmail(p.email); setFPassword('')
-    setFRole(p.role === 'super_admin' ? 'admin' : p.role as 'admin' | 'user')
+    setFRole(p.role)
     setFGroups(new Set(members.filter(m => m.user_id === p.id).map(m => m.group_id)))
     setFStaffId(p.staff_id ?? '')
     setEditing(p); setErr(''); setModal('edit')
@@ -105,7 +105,12 @@ export default function UserManagement() {
     const res = await fetch('/api/admin/users', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: editing.id, name: fName.trim(), role: fRole, staff_id: fStaffId || null }),
+      // Only send role when it actually changed — avoids demoting a super_admin
+      // (whose role isn't selectable here) and avoids a needless hierarchy rejection.
+      body: JSON.stringify({
+        id: editing.id, name: fName.trim(), staff_id: fStaffId || null,
+        ...(fRole !== editing.role ? { role: fRole } : {}),
+      }),
     })
     if (!res.ok) { const j = await res.json(); setErr(j.error ?? 'Failed'); setSaving(false); return }
     // Sync group memberships
@@ -221,10 +226,15 @@ export default function UserManagement() {
               )}
               <div>
                 <label style={lbl}>Role</label>
-                <select style={inp} value={fRole} onChange={e => setFRole(e.target.value as 'admin' | 'user')}>
+                <select style={inp} value={fRole} onChange={e => setFRole(e.target.value as Profile['role'])}
+                  disabled={editing?.role === 'super_admin'}>
                   <option value="user">User — access determined by group</option>
                   <option value="admin">Admin — can manage users and settings</option>
+                  {editing?.role === 'super_admin' && <option value="super_admin">Super Admin</option>}
                 </select>
+                {editing?.role === 'super_admin' && (
+                  <div style={{ fontSize: 11, color: T.muted, marginTop: 4 }}>The Super Admin role can’t be changed here.</div>
+                )}
               </div>
               <div>
                 <label style={lbl}>Linked Staff Member</label>
