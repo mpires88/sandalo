@@ -93,18 +93,31 @@ export default function Dashboard({ clientId }: { clientId: string }) {
     let cancelled = false
     ;(async () => {
       setLoading(true); setError(null)
-      // Paginate bank_transactions to avoid the 1000-row Supabase cap
-      let allTxns: Txn[] = []
+      // Paginate bank_transactions to avoid the 1000-row Supabase cap.
+      // .order() makes the pages stable — unordered ranges can skip/duplicate rows.
+      type TxnRow = { transaction_date: string; amount: string | number; account: string | null; splits: Array<{ account: string; amount: number }> | null }
+      let allRows: TxnRow[] = []
       let offset = 0
       while (true) {
         const res = await supabase
-          .from('bank_transactions').select('transaction_date, amount, account')
-          .eq('client_id', clientId).not('account', 'is', null).neq('account', '')
+          .from('bank_transactions').select('transaction_date, amount, account, splits')
+          .eq('client_id', clientId).or('account.not.is.null,splits.not.is.null')
+          .order('id')
           .range(offset, offset + 999)
-        const batch = (res.data ?? []) as Txn[]
-        allTxns = [...allTxns, ...batch]
+        const batch = (res.data ?? []) as TxnRow[]
+        allRows = [...allRows, ...batch]
         if (batch.length < 1000) break
         offset += 1000
+      }
+      // Expand split transactions into their legs — the parent row's account is null,
+      // so without this every split disappears from the P&L entirely
+      const allTxns: Txn[] = []
+      for (const t of allRows) {
+        if (t.splits?.length) {
+          for (const leg of t.splits) if (leg.account) allTxns.push({ transaction_date: t.transaction_date, amount: leg.amount, account: leg.account })
+        } else if (t.account) {
+          allTxns.push({ transaction_date: t.transaction_date, amount: t.amount, account: t.account })
+        }
       }
 
       const [sqRes, catRes] = await Promise.all([
@@ -162,6 +175,9 @@ export default function Dashboard({ clientId }: { clientId: string }) {
 
   const expenseByCategory = useMemo(() => {
     const byCat: Record<string, number> = {}
+    // Latest year only — the UI labels this section "{curYear} Expense Breakdown"
+    // and divides by current-year month count, so mixing years overstates everything
+    const curYr = txns.reduce((max, t) => { const y = (t.transaction_date || '').slice(0, 4); return y > max ? y : max }, '')
     const topParent = (name: string): string => {
       const seen = new Set<string>()
       let cur = name
@@ -170,6 +186,7 @@ export default function Dashboard({ clientId }: { clientId: string }) {
     }
     txns.forEach(t => {
       if (!t.account) return
+      if ((t.transaction_date || '').slice(0, 4) !== curYr) return
       const section = sectionMap[t.account] ?? 'Operating Expenses'
       if (section !== 'Operating Expenses') return
       const key = topParent(t.account)

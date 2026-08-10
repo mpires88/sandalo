@@ -179,10 +179,15 @@ function custShort(c: Appt['customers']) {
   if (!c) return '—'
   return `${c.first_name} ${c.last_name[0]}.`
 }
-function isoToday() { return new Date().toISOString().slice(0, 10) }
+// Format a Date as YYYY-MM-DD in *local* time — toISOString() converts to UTC,
+// which shifts the calendar day near midnight (e.g. evenings in US timezones)
+function isoDate(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+function isoToday() { return isoDate(new Date()) }
 function addDays(iso: string, n: number) {
   const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n)
-  return d.toISOString().slice(0, 10)
+  return isoDate(d)
 }
 
 export default function Appointments() {
@@ -311,8 +316,8 @@ export default function Appointments() {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try {
-      const start = month.toISOString().slice(0, 10)
-      const end   = new Date(month.getFullYear(), month.getMonth() + 1, 0).toISOString().slice(0, 10)
+      const start = isoDate(month)
+      const end   = isoDate(new Date(month.getFullYear(), month.getMonth() + 1, 0))
       const { data, error: err } = await supabase
         .from('appointments')
         .select('*, customers(first_name, middle_name, last_name), services(name, price, duration_minutes), staff(name)')
@@ -448,6 +453,7 @@ export default function Appointments() {
     setSaving(true); setFormErr('')
     try {
       const durMin   = parseInt(form.duration_minutes) || 60
+      if (durMin <= 0) { setFormErr(t('Duration must be a positive number of minutes.', 'La duración debe ser un número positivo de minutos.')); return }
       const [sh, sm] = form.start_time.split(':').map(Number)
       const newStart = sh * 60 + sm, newEnd = newStart + durMin
       // How many resource slots this booking will consume (1 per party member)
@@ -462,7 +468,7 @@ export default function Appointments() {
           .eq('client_id', CLIENT_ID)
           .eq('appointment_date', form.appointment_date)
           .eq('resource_id', form.resource_id)
-          .in('status', ['scheduled', 'completed'])
+          .in('status', ['scheduled', 'checked_in', 'completed'])
           .limit(200)
         const overlapping = (existing ?? []).filter(a => {
           // Exclude all records from the same group when editing
@@ -471,8 +477,15 @@ export default function Appointments() {
           const aStart = ah * 60 + am, aEnd = aStart + a.duration_minutes
           return newStart < aEnd && newEnd > aStart
         })
-        if (resource && overlapping.length + slotsNeeded > resource.quantity) {
-          const avail = Math.max(0, resource.quantity - overlapping.length)
+        // Compare peak *concurrent* usage against capacity — counting every overlap
+        // rejects bookings when back-to-back appointments never actually coexist
+        const starts = overlapping.map(a => { const [ah, am] = a.start_time.split(':').map(Number); return ah * 60 + am })
+        const peak = [newStart, ...starts.filter(p => p > newStart && p < newEnd)].reduce((max, p) => {
+          const busy = overlapping.filter((a, i) => starts[i] <= p && p < starts[i] + a.duration_minutes).length
+          return Math.max(max, busy)
+        }, 0)
+        if (resource && peak + slotsNeeded > resource.quantity) {
+          const avail = Math.max(0, resource.quantity - peak)
           setFormErr(t(
             `${resource.name} only has ${avail} of ${resource.quantity} slot${resource.quantity !== 1 ? 's' : ''} available — this booking needs ${slotsNeeded}.`,
             `${resource.name} solo tiene ${avail} de ${resource.quantity} espacio${resource.quantity !== 1 ? 's' : ''} disponible — esta reserva necesita ${slotsNeeded}.`
@@ -513,7 +526,7 @@ export default function Appointments() {
         client_id: CLIENT_ID, service_id: form.service_id,
         resource_id: form.resource_id || null,
         appointment_date: form.appointment_date, start_time: form.start_time,
-        duration_minutes: parseInt(form.duration_minutes) || 60, status: form.status,
+        duration_minutes: durMin, status: form.status,
         price_charged: form.price_charged ? parseFloat(form.price_charged) : null,
         tip_amount: parseFloat(form.tip_amount) || 0, deposit_paid: parseFloat(form.deposit_paid) || 0,
         payment_method: form.payment_method || null,
@@ -537,6 +550,11 @@ export default function Appointments() {
             ...basePayload,
             customer_id: form.extra_customers[i] || form.customer_id,
             staff_id: sid,
+            // The form's price/tip/deposit cover the whole booking — only the primary
+            // record carries them, or monthly revenue counts the sale once per guest
+            price_charged: null,
+            tip_amount: 0,
+            deposit_paid: 0,
           })),
         ]
         // Validate that all extra staff are selected
@@ -597,10 +615,20 @@ export default function Appointments() {
   // Phase 2 — Check Out: build the ticket/bill and open the checkout window
   async function openBill(a: Appt) {
     const svc = services.find(s => s.id === a.service_id)
-    const addonList = await loadApptAddons(a.id)
+    const { data: addonRows } = await supabase
+      .from('appointment_addons').select('addon_id, price_charged').eq('appointment_id', a.id)
     const lines: BillLine[] = []
-    lines.push({ label: a.services?.name ?? svc?.name ?? 'Service', amount: Number(a.services?.price ?? svc?.price ?? 0) })
-    addonList.forEach(ad => lines.push({ label: ad.name, amount: Number(ad.price) }))
+    // Bill what was agreed at booking (price_charged), not today's catalog prices.
+    // Secondary records of a group booking carry no charge — the primary holds it.
+    const isGroupExtra = a.group_id != null && a.price_charged == null
+    lines.push({
+      label: a.services?.name ?? svc?.name ?? 'Service',
+      amount: isGroupExtra ? 0 : Number(a.price_charged ?? a.services?.price ?? svc?.price ?? 0),
+    })
+    ;(addonRows ?? []).forEach((r: { addon_id: string; price_charged: number | null }) => {
+      const ad = addons.find(x => x.id === r.addon_id)
+      lines.push({ label: ad?.name ?? 'Add-on', amount: Number(r.price_charged ?? ad?.price ?? 0) })
+    })
     setBillLines(lines)
     setBillTip(String(a.tip_amount ?? 0))
     setBillPayment(a.payment_method ?? 'square')
@@ -614,8 +642,8 @@ export default function Appointments() {
     if (!billAppt) return
     setBillSaving(true)
     try {
-      const subtotal = billLines.reduce((s, l) => s + l.amount, 0)
-      const tip = parseFloat(billTip) || 0
+      const subtotal = Math.round(billLines.reduce((s, l) => s + l.amount, 0) * 100) / 100
+      const tip = Math.round((parseFloat(billTip) || 0) * 100) / 100
       await supabase.from('appointments').update({
         status: 'completed',
         price_charged: subtotal,
@@ -822,12 +850,15 @@ export default function Appointments() {
 
                       {/* Time block overlays */}
                       {dayBlocks.filter(b => b.staff_id === s.id).map(b => {
-                        const topPx = timeToPx(b.start_time)
                         const [eh, em] = b.end_time.split(':').map(Number)
                         const [sh, sm] = b.start_time.split(':').map(Number)
                         const durMin = (eh * 60 + em) - (sh * 60 + sm)
-                        const hPx = Math.max(durationToPx(durMin), 8)
-                        if (topPx < 0 || topPx >= totalHeight) return null
+                        // Render the portion inside the grid — a block starting before
+                        // 8 AM must still cover its in-view hours, not vanish
+                        const rawTop = timeToPx(b.start_time)
+                        const topPx = Math.max(rawTop, 0)
+                        const hPx = Math.min(rawTop + Math.max(durationToPx(durMin), 8), totalHeight) - topPx
+                        if (hPx <= 0) return null
                         return (
                           <div
                             key={b.id}
@@ -854,10 +885,11 @@ export default function Appointments() {
 
                       {/* Appointment blocks */}
                       {staffAppts.map(a => {
-                        const topPx = timeToPx(a.start_time)
                         const hPx   = Math.max(durationToPx(a.duration_minutes), slotH)
                         const sc    = STATUS_COLORS[a.status] ?? STATUS_COLORS.scheduled
-                        if (topPx < 0 || topPx >= totalHeight) return null
+                        // Clamp off-grid bookings to the nearest edge — an early/late
+                        // appointment must stay visible or staff will miss the guest
+                        const topPx = Math.min(Math.max(timeToPx(a.start_time), 0), totalHeight - slotH)
                         return (
                           <div
                             key={a.id}
@@ -1303,7 +1335,7 @@ export default function Appointments() {
                 </div>
                 <div><label style={lbl}>{t('Date *', 'Fecha *')}</label><input type="date" disabled={apptIsPast} value={form.appointment_date} onChange={e => setForm(f => ({ ...f, appointment_date: e.target.value }))} style={{ ...inp, ...(apptIsPast ? { background: '#F3F1EB', color: D.muted, cursor: 'not-allowed' } : {}) }} /></div>
                 <div><label style={lbl}>{t('Start Time *', 'Hora de Inicio *')}</label><input type="time" disabled={apptIsPast} value={form.start_time} onChange={e => setForm(f => ({ ...f, start_time: e.target.value }))} style={{ ...inp, ...(apptIsPast ? { background: '#F3F1EB', color: D.muted, cursor: 'not-allowed' } : {}) }} /></div>
-                <div><label style={lbl}>{t('Duration (min)', 'Duración (min)')}</label><input type="number" value={form.duration_minutes} onChange={e => setForm(f => ({ ...f, duration_minutes: e.target.value }))} placeholder="60" style={inp} /></div>
+                <div><label style={lbl}>{t('Duration (min)', 'Duración (min)')}</label><input type="number" min={1} value={form.duration_minutes} onChange={e => setForm(f => ({ ...f, duration_minutes: e.target.value }))} placeholder="60" style={inp} /></div>
                 <div><label style={lbl}>{t('Status', 'Estado')}</label><select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value as ApptStatus }))} style={inp}><option value="scheduled">{t('Scheduled', 'Programado')}</option><option value="completed">{t('Completed', 'Completado')}</option><option value="no_show">{t('No Show', 'No Asistió')}</option><option value="cancelled">{t('Cancelled', 'Cancelado')}</option></select></div>
                 <div style={{ ...secHead, marginTop: 2 }}>{t('Payment', 'Pago')}</div>
                 <div><label style={lbl}>{t('Price Charged', 'Precio Cobrado')}</label><input type="number" step="0.01" value={form.price_charged} onChange={e => setForm(f => ({ ...f, price_charged: e.target.value }))} placeholder="0.00" style={inp} /></div>
@@ -1489,7 +1521,8 @@ export default function Appointments() {
       {billAppt && (() => {
         const subtotal = billLines.reduce((s, l) => s + l.amount, 0)
         const tip = parseFloat(billTip) || 0
-        const total = subtotal + tip
+        const deposit = Number(billAppt.deposit_paid) || 0
+        const total = subtotal + tip - deposit
         return (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={e => { if (e.target === e.currentTarget) setBillAppt(null) }}>
             <div style={{ background: '#fff', borderRadius: 10, width: 440, maxWidth: '95vw', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
@@ -1515,8 +1548,14 @@ export default function Appointments() {
                   <div style={{ gridColumn: '1 / -1' }}><label style={lbl}>{t('Notes', 'Notas')}</label><textarea value={billNotes} onChange={e => setBillNotes(e.target.value)} rows={2} placeholder={t('Optional', 'Opcional')} style={{ ...inp, resize: 'vertical', fontFamily: 'inherit' }} /></div>
                 </div>
                 {/* Total */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 14, paddingTop: 12, borderTop: `2px solid ${D.border}` }}>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: D.charcoal }}>{t('Total', 'Total')}</span>
+                {deposit > 0 && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 14, fontSize: 13, color: D.charcoal }}>
+                    <span>{t('Deposit paid', 'Depósito pagado')}</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>−{fmtMoney(deposit)}</span>
+                  </div>
+                )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: deposit > 0 ? 8 : 14, paddingTop: 12, borderTop: `2px solid ${D.border}` }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: D.charcoal }}>{deposit > 0 ? t('Total Due', 'Total a Pagar') : t('Total', 'Total')}</span>
                   <span style={{ fontSize: 20, fontWeight: 700, color: '#0E7C7B', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(total)}</span>
                 </div>
                 {/* Square integration — stubbed */}

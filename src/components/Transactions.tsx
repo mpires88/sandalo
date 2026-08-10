@@ -79,6 +79,16 @@ function parseDate(raw: string, fmt: string): string | null {
   return `${y}-${m}-${d}`
 }
 
+// Parse a CSV money cell: strips $/commas/spaces and normalizes accounting negatives —
+// parens "(500.00)" and trailing minus "500.00-" — before converting. NaN on garbage.
+function parseMoney(raw: string): number {
+  let s = (raw || '').replace(/[$,\s]/g, '')
+  if (!s) return NaN
+  if (s.startsWith('(') && s.endsWith(')')) s = '-' + s.slice(1, -1)
+  else if (s.endsWith('-')) s = '-' + s.slice(0, -1)
+  return s === '' || isNaN(Number(s)) ? NaN : Number(s)
+}
+
 interface ParsedRow {
   id?: string
   transaction_date: string; description: string; amount: number
@@ -180,7 +190,7 @@ const [expanded,      setExpanded]      = useState<Record<string, boolean>>({})
     try {
       await seedTransactionsOnce(clientId)
       const [txnRes, catRes] = await Promise.all([
-        supabase.from('bank_transactions').select('id, transaction_date, description, amount, category, account, splits').eq('client_id', clientId).range(0, 999),
+        supabase.from('bank_transactions').select('id, transaction_date, description, amount, category, account, splits').eq('client_id', clientId).order('id').range(0, 999),
         supabase.from('categories').select('name, sort_order, pl_section, parent').eq('client_id', clientId).order('sort_order'),
       ])
       if (txnRes.error) throw txnRes.error
@@ -212,7 +222,7 @@ const [expanded,      setExpanded]      = useState<Record<string, boolean>>({})
         setLoadingMore(true)
         let offset = 1000
         while (true) {
-          const res = await supabase.from('bank_transactions').select('id, transaction_date, description, amount, category, account, splits').eq('client_id', clientId).range(offset, offset + 999)
+          const res = await supabase.from('bank_transactions').select('id, transaction_date, description, amount, category, account, splits').eq('client_id', clientId).order('id').range(offset, offset + 999)
           if (res.error || !res.data?.length) break
           all = [...all, ...res.data]
           setTxns(all)
@@ -332,8 +342,8 @@ const [expanded,      setExpanded]      = useState<Record<string, boolean>>({})
           if (updateErr) throw updateErr
         }
         setTxns(prev => prev.map(t => ids.includes(t.id) ? { ...t, account: name } : t))
-        setExpandSelected(prev => ({ ...prev, [createModal.categoryKey]: new Set() }))
-        setExpandMoveTo(prev => ({ ...prev, [createModal.categoryKey]: '' }))
+        setTxSelected(new Set())
+        setTxBulkAccount('')
       } else {
         // Assign to all transactions in this category
         const { error: updateErr } = await supabase.from('bank_transactions').update({ account: name }).eq('category', createModal.categoryKey).eq('client_id', clientId)
@@ -975,12 +985,17 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
       if (!rawDesc) return { error: { line, msg: 'Empty description' } }
       let amount: number
       if (splitAmounts) {
-        const credit = parseFloat((raw[cols.credit] || '0').replace(/[$,\s]/g, '')) || 0
-        const debit  = parseFloat((raw[cols.debit]  || '0').replace(/[$,\s]/g, '')) || 0
+        const rawCredit = (raw[cols.credit] || '').trim()
+        const rawDebit  = (raw[cols.debit]  || '').trim()
+        const credit = rawCredit ? parseMoney(rawCredit) : 0
+        const debit  = rawDebit  ? parseMoney(rawDebit)  : 0
+        // A malformed cell must be a parse error, not a silent 0 — `|| 0` here
+        // imported parens-negative debits as $0 transactions
+        if (isNaN(credit)) return { error: { line, msg: `Invalid credit "${raw[cols.credit]}"` } }
+        if (isNaN(debit))  return { error: { line, msg: `Invalid debit "${raw[cols.debit]}"` } }
         amount = credit - debit
       } else {
-        const rawAmt = (raw[cols.amount] || '').replace(/[$,\s]/g, '')
-        amount = parseFloat(rawAmt)
+        amount = parseMoney(raw[cols.amount] || '')
         if (isNaN(amount)) return { error: { line, msg: `Invalid amount "${raw[cols.amount]}"` } }
         if (debitsPositive) amount = -amount
         if (indicatorCol && raw[indicatorCol]) {
@@ -1148,7 +1163,7 @@ function ImportModal({ clientId, allCats, catSectionMap, existingTxns, onDone, o
                       const saved = loadAllMappings()[id]
                       if (saved) {
                         const { indicatorCol: auto } = csv ? autoDetectCols(csv.headers) : { indicatorCol: '' }
-                        setCfg({ ...DEFAULT_CFG(), indicatorCol: auto ?? '', ...saved, sourceAccountId: id })
+                        setCfg({ ...DEFAULT_CFG(), ...saved, indicatorCol: saved.indicatorCol ?? auto ?? '', sourceAccountId: id })
                       } else {
                         setProp('sourceAccountId', id)
                       }

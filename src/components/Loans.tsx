@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase'
 import {
   type Loan, type LoanFrequency, type LoanType, type InstrumentType, type LoanDisbursement,
   INSTRUMENT_LABELS, usesInterestRate, usesFactorRate, usesFlatFee, hasFixedSchedule, hasLoanType, isInformalDebt,
-  calcOutstandingBalance, calcPaymentAmount,
+  calcOutstandingBalance, calcPaymentAmount, calcTotalDrawn,
 } from '@/lib/loans'
 
 const D = {
@@ -51,7 +51,7 @@ const BLANK: LoanForm = {
   default_rate: '', notes: '', linked_account_id: '',
 }
 
-interface LoanWithBalance extends Loan { outstanding: number; linkedAccount?: string }
+interface LoanWithBalance extends Loan { outstanding: number; drawn: number; linkedAccount?: string }
 
 export default function Loans({ clientId }: { clientId: string }) {
   const [loans, setLoans] = useState<LoanWithBalance[]>([])
@@ -76,7 +76,7 @@ export default function Loans({ clientId }: { clientId: string }) {
         instrument_type: 'flat_fee',
         loan_type: 'interest_only',
         original_principal: 50000,
-        interest_rate: 0.30,
+        total_fee: 30000,
         start_date: '2023-10-05',
         term_months: 24,
         payment_frequency: 'monthly',
@@ -90,11 +90,13 @@ export default function Loans({ clientId }: { clientId: string }) {
       .from('loans').select('*').eq('client_id', clientId).order('start_date')
     if (e1) { setError(e1.message); setLoading(false); return }
 
+    // Whole-portfolio balance math needs every payment/disbursement row; without an
+    // explicit limit PostgREST silently truncates at 1000 and balances drift
     const { data: payRows } = await supabase
-      .from('loan_payments').select('*').eq('client_id', clientId)
+      .from('loan_payments').select('*').eq('client_id', clientId).limit(10000)
 
     const { data: disbRows } = await supabase
-      .from('loan_disbursements').select('*').eq('client_id', clientId)
+      .from('loan_disbursements').select('*').eq('client_id', clientId).limit(10000)
 
     const { data: linkedCats } = await supabase
       .from('categories').select('loan_id, name')
@@ -120,6 +122,7 @@ export default function Loans({ clientId }: { clientId: string }) {
     setLoans((loanRows ?? []).map((l: Loan) => ({
       ...l,
       outstanding: calcOutstandingBalance(l, groupedPay[l.id] ?? [], groupedDisb[l.id] ?? []),
+      drawn: calcTotalDrawn(l, groupedDisb[l.id] ?? []),
       linkedAccount: linkedAccountMap[l.id],
     })))
     setLoading(false)
@@ -319,7 +322,9 @@ export default function Loans({ clientId }: { clientId: string }) {
 
   const totalOutstanding = loans.reduce((s, l) => s + l.outstanding, 0)
   const totalOriginal = loans.reduce((s, l) => s + l.original_principal, 0)
-  const totalPaid = totalOriginal - totalOutstanding
+  // Principal actually repaid = drawn − outstanding; using original − outstanding
+  // would count undrawn commitment as "paid down"
+  const totalPaid = loans.reduce((s, l) => s + (l.drawn - l.outstanding), 0)
 
   const inp: React.CSSProperties = {
     width: '100%', padding: '7px 10px', border: `1px solid ${D.border}`,

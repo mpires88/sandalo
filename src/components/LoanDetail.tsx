@@ -259,12 +259,11 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
     const to = new Date(d); to.setDate(to.getDate() + 14)
     const { data } = await supabase
       .from('bank_transactions').select('id, transaction_date, description, amount')
-      .eq('client_id', clientId).order('transaction_date')
-    const inRange = (data ?? []).filter((t: BankTxn) =>
-      t.transaction_date >= from.toISOString().slice(0, 10) &&
-      t.transaction_date <= to.toISOString().slice(0, 10)
-    )
-    setBankTxns(inRange)
+      .eq('client_id', clientId)
+      .gte('transaction_date', from.toISOString().slice(0, 10))
+      .lte('transaction_date', to.toISOString().slice(0, 10))
+      .order('transaction_date')
+    setBankTxns(data ?? [])
   }
 
   function openRecordPayment() {

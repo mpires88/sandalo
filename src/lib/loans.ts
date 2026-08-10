@@ -133,15 +133,24 @@ export function periodsPerYear(freq: LoanFrequency): number {
   }
 }
 
+// Add whole months, clamping to the last day of the target month (Jan 31 + 1mo →
+// Feb 28) — naked setMonth() rolls the overflow into the next month (→ Mar 3)
+function addMonths(dateStr: string, months: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number)
+  const idx = m - 1 + months
+  const ty = y + Math.floor(idx / 12)
+  const tm = ((idx % 12) + 12) % 12
+  const td = Math.min(d, new Date(ty, tm + 1, 0).getDate())
+  return `${ty}-${String(tm + 1).padStart(2, '0')}-${String(td).padStart(2, '0')}`
+}
+
 export function addPeriod(dateStr: string, freq: LoanFrequency): string {
+  if (freq === 'monthly')   return addMonths(dateStr, 1)
+  if (freq === 'quarterly') return addMonths(dateStr, 3)
   const d = new Date(dateStr + 'T12:00:00')
-  switch (freq) {
-    case 'daily':     d.setDate(d.getDate() + 1); break
-    case 'weekly':    d.setDate(d.getDate() + 7); break
-    case 'biweekly':  d.setDate(d.getDate() + 14); break
-    case 'monthly':   d.setMonth(d.getMonth() + 1); break
-    case 'quarterly': d.setMonth(d.getMonth() + 3); break
-  }
+  if (freq === 'daily')    d.setDate(d.getDate() + 1)
+  if (freq === 'weekly')   d.setDate(d.getDate() + 7)
+  if (freq === 'biweekly') d.setDate(d.getDate() + 14)
   return d.toISOString().slice(0, 10)
 }
 
@@ -152,14 +161,12 @@ export function dayBefore(dateStr: string): string {
 }
 
 function subPeriod(dateStr: string, freq: LoanFrequency): string {
+  if (freq === 'monthly')   return addMonths(dateStr, -1)
+  if (freq === 'quarterly') return addMonths(dateStr, -3)
   const d = new Date(dateStr + 'T12:00:00')
-  switch (freq) {
-    case 'daily':     d.setDate(d.getDate() - 1); break
-    case 'weekly':    d.setDate(d.getDate() - 7); break
-    case 'biweekly':  d.setDate(d.getDate() - 14); break
-    case 'monthly':   d.setMonth(d.getMonth() - 1); break
-    case 'quarterly': d.setMonth(d.getMonth() - 3); break
-  }
+  if (freq === 'daily')    d.setDate(d.getDate() - 1)
+  if (freq === 'weekly')   d.setDate(d.getDate() - 7)
+  if (freq === 'biweekly') d.setDate(d.getDate() - 14)
   return d.toISOString().slice(0, 10)
 }
 
@@ -214,7 +221,9 @@ function generateMcaSchedule(loan: Loan, draws: LoanDisbursement[] | null): Amor
     const interest = r2(payment - principal)   // factor cost portion
     remaining = r2(remaining - payment)
     principalBalance = r2(Math.max(0, principalBalance - principal))
-    const paymentDate = addPeriod(accrualStart, loan.payment_frequency)
+    // No draws: start_date IS the contractual first payment date — pin it instead of
+    // round-tripping through subPeriod/addPeriod (imperfect near month-end)
+    const paymentDate = i === 1 && !draws ? loan.start_date : addPeriod(accrualStart, loan.payment_frequency)
     const accrualEnd = dayBefore(paymentDate)
 
     rows.push({ period: i, accrualStart, accrualEnd, date: paymentDate, payment: r2(payment), principal, interest, balance: principalBalance })
@@ -236,7 +245,8 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
     let accrualStart = subPeriod(loan.start_date, loan.payment_frequency)
     let feeRemaining = loan.total_fee
     for (let i = 1; i <= totalPeriods; i++) {
-      const paymentDate = addPeriod(accrualStart, loan.payment_frequency)
+      // start_date is the contractual first payment date — pin it (see MCA note)
+      const paymentDate = i === 1 ? loan.start_date : addPeriod(accrualStart, loan.payment_frequency)
       const accrualEnd = dayBefore(paymentDate)
       const isLast = i === totalPeriods
       const fee = isLast ? r2(feeRemaining) : perPeriodFee
@@ -250,6 +260,10 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
   }
 
   const periodicRate = (loan.interest_rate ?? 0) / ppy
+  // Balloon loans pay the agreed periodic amount — recomputing a fully-amortizing
+  // payment would erase the balloon and misstate every principal/interest split
+  const paymentOverride = loan.loan_type === 'balloon' && loan.payment_amount > 0
+    ? loan.payment_amount : undefined
 
   // No draws: loan.start_date is first payment date; pass subPeriod so the schedule
   // preserves that date while computing accrualStart one period earlier.
@@ -257,6 +271,7 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
     return buildScheduleSegment(
       loan.original_principal, subPeriod(loan.start_date, loan.payment_frequency), 1, totalPeriods,
       periodicRate, loan.payment_frequency, loan.loan_type,
+      { firstPaymentDate: loan.start_date, paymentOverride },
     )
   }
 
@@ -330,6 +345,12 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
       ...buildScheduleSegment(
         newBalance, segmentStartDate, periodsUsed + 1, totalPeriods,
         periodicRate, loan.payment_frequency, loan.loan_type,
+        {
+          // Draw on/after start_date: the draw date is itself the first payment date
+          firstPaymentDate: splitIdx < 0 && draw.disbursement_date >= loan.start_date
+            ? draw.disbursement_date : undefined,
+          paymentOverride,
+        },
       ),
     ]
   }
@@ -337,12 +358,13 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
   return stubRow ? [stubRow, ...rows] : rows
 }
 
-// Builds amortization rows for a single segment. Payment is calculated from the
-// balance and number of remaining periods — not taken from loan.payment_amount.
+// Builds amortization rows for a single segment. Payment is recalculated from the
+// balance and remaining periods unless opts.paymentOverride pins the agreed amount.
 function buildScheduleSegment(
   balance: number, startDate: string,
   startPeriod: number, endPeriod: number,
   periodicRate: number, freq: LoanFrequency, loanType: LoanType,
+  opts?: { firstPaymentDate?: string; paymentOverride?: number },
 ): AmortizationRow[] {
   const nPeriods = endPeriod - startPeriod + 1
 
@@ -350,6 +372,8 @@ function buildScheduleSegment(
   let payment: number
   if (loanType === 'interest_only') {
     payment = r2(balance * periodicRate)  // interest-only; principal balloon at end
+  } else if (opts?.paymentOverride) {
+    payment = opts.paymentOverride
   } else if (periodicRate > 0) {
     payment = r2(balance * periodicRate / (1 - Math.pow(1 + periodicRate, -nPeriods)))
   } else {
@@ -376,7 +400,9 @@ function buildScheduleSegment(
       principal = r2(Math.min(pmt - interest, bal))
     }
 
-    const paymentDate = addPeriod(accrualStart, freq)
+    const paymentDate = i === startPeriod && opts?.firstPaymentDate
+      ? opts.firstPaymentDate
+      : addPeriod(accrualStart, freq)
     const accrualEnd = dayBefore(paymentDate)
     bal = r2(Math.max(0, bal - principal))
     rows.push({ period: i, accrualStart, accrualEnd, date: paymentDate, payment: pmt, principal, interest, balance: bal })

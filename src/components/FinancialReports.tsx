@@ -16,7 +16,9 @@ type ReportMode = 'pl' | 'bs'
 type PeriodMode = 'latest' | 'monthly' | 'yearly'
 
 // Revenue/income sections show amounts as-is (positive = good).
-// Expense/cost/liability sections have negative raw amounts (debits); multiply by -1 to display as positive costs.
+// Expense/cost sections have negative raw amounts (debits); multiply by -1 to display as positive costs.
+// Liability/equity categories follow the cash convention (draw/contribution = +, repayment = −),
+// so their cumulative balances are already positive while owed — display as-is.
 const DISPLAY_SIGN: Record<string, number> = {
   'Revenue':                1,
   'Deductions to Income':  -1,
@@ -26,16 +28,17 @@ const DISPLAY_SIGN: Record<string, number> = {
   'Non-Operating Expenses':-1,
   'Current Assets':         1,
   'Non-Current Assets':     1,
-  'Current Liabilities':   -1,
-  'Non-Current Liabilities':-1,
-  'Equity':                -1,
+  'Current Liabilities':    1,
+  'Non-Current Liabilities':1,
+  'Equity':                 1,
 }
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
 function fmtAmt(n: number): string {
   if (!n) return '—'
-  return '$' + Math.abs(n).toLocaleString('en-US', { maximumFractionDigits: 0 })
+  const s = '$' + Math.abs(n).toLocaleString('en-US', { maximumFractionDigits: 0 })
+  return n < 0 ? `(${s})` : s
 }
 
 export default function FinancialReports() {
@@ -74,15 +77,17 @@ export default function FinancialReports() {
         .order('created_at')
       setFinAccounts(faData ?? [])
 
-      // Paginate transactions in batches of 1000 (Supabase default cap)
-      type TxnRow = { transaction_date: string; amount: string | number; account: string; source_account_id?: string | null }
+      // Paginate transactions in batches of 1000 (Supabase default cap).
+      // .order() makes the pages stable — unordered ranges can skip/duplicate rows.
+      type TxnRow = { transaction_date: string; amount: string | number; account: string | null; source_account_id?: string | null; splits?: Array<{ account: string; amount: number }> | null }
       let allRows: TxnRow[] = []
       let offset = 0
       while (true) {
         const res = await supabase
           .from('bank_transactions')
-          .select('transaction_date, amount, account, source_account_id')
+          .select('transaction_date, amount, account, source_account_id, splits')
           .eq('client_id', CLIENT_ID)
+          .order('id')
           .range(offset, offset + 999)
         const batch = (res.data ?? []) as TxnRow[]
         allRows = [...allRows, ...batch]
@@ -98,10 +103,14 @@ export default function FinancialReports() {
         if (!t.transaction_date) continue
         const mk = (t.transaction_date as string).slice(0, 7)
         const amt = parseFloat(String(t.amount)) || 0
-        if (t.account) {
+        // Split transactions post each leg to its own account (the parent's account is null)
+        const legs = t.splits?.length
+          ? t.splits.filter(l => l.account).map(l => ({ account: l.account, amount: Number(l.amount) || 0 }))
+          : (t.account ? [{ account: t.account, amount: amt }] : [])
+        for (const leg of legs) {
           monthSet.add(mk)
-          if (!monthly[t.account]) monthly[t.account] = {}
-          monthly[t.account][mk] = (monthly[t.account][mk] ?? 0) + amt
+          if (!monthly[leg.account]) monthly[leg.account] = {}
+          monthly[leg.account][mk] = (monthly[leg.account][mk] ?? 0) + leg.amount
         }
         if (t.source_account_id) {
           monthSet.add(mk)
@@ -182,21 +191,16 @@ export default function FinancialReports() {
     return raw * (DISPLAY_SIGN[section] ?? 1)
   }
 
-  // Sum of display amounts for all immediate children (each child resolved recursively)
-  function parentAmt(parent: string, section: string, key: string): number {
-    return (bySection[section] ?? [])
-      .filter(a => a.parent === parent)
-      .reduce((s, c) => s + accountTotal(c.name, section, key), 0)
-  }
-
-  // Recursive sum for an account: if it has children sum them, otherwise return own dispAmt.
+  // Recursive sum for an account: own amount plus all descendants — transactions can
+  // be posted directly to a parent account, so its own activity always counts.
   // Also adds any financial accounts parented to this category.
   function accountTotal(name: string, section: string, key: string): number {
     const kids = (bySection[section] ?? []).filter(a => a.parent === name)
     const faKids = faChildrenOf(name)
     const faContrib = faKids.reduce((s, a) => s + acctDispAmt(a, key), 0)
-    if (kids.length > 0) return kids.reduce((s, c) => s + accountTotal(c.name, section, key), 0) + faContrib
-    return dispAmt(name, section, key) + faContrib
+    return dispAmt(name, section, key)
+      + kids.reduce((s, c) => s + accountTotal(c.name, section, key), 0)
+      + faContrib
   }
 
   // Sum of all top-level accounts in a section (parents display as sum of all descendants)
@@ -383,7 +387,7 @@ export default function FinancialReports() {
           {a.name}
         </td>
         {displayPeriods.map(k => {
-          const v = isParent ? parentAmt(a.name, section, k) : dispAmt(a.name, section, k)
+          const v = isParent ? accountTotal(a.name, section, k) : dispAmt(a.name, section, k)
           return amtCell(v, isParent, false, k === 'total')
         })}
       </tr>
@@ -445,9 +449,9 @@ export default function FinancialReports() {
 
   // True if account or any of its descendants have activity in any displayed period
   function hasAnyActivity(name: string, section: string): boolean {
+    if (hasActivity(name, section)) return true
     const kids = (bySection[section] ?? []).filter(a => a.parent === name)
-    if (kids.length > 0) return kids.some(c => hasAnyActivity(c.name, section))
-    return hasActivity(name, section)
+    return kids.some(c => hasAnyActivity(c.name, section))
   }
 
   // Render all account rows for a section — handles up to 3 levels via recursion
@@ -462,7 +466,7 @@ export default function FinancialReports() {
 
       if (hasKids) {
         const activeKids = kids.filter(c => hasAnyActivity(c.name, section))
-        if (activeKids.length === 0 && faKids.length === 0) return
+        if (activeKids.length === 0 && faKids.length === 0 && !hasActivity(a.name, section)) return
         const isCollapsed = collapsed.has(a.name)
         rows.push(accountRow(a, section, depth, true, isCollapsed, () => toggleCollapsed(a.name)))
         if (!isCollapsed) {
