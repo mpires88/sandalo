@@ -217,6 +217,7 @@ export default function Appointments() {
   const [form,    setForm]    = useState<ApptForm>({ ...BLANK })
   const [saving,  setSaving]  = useState(false)
   const [formErr, setFormErr] = useState('')
+  const [dblBookWarn, setDblBookWarn] = useState<string | null>(null)
 
   const [editingAppt,   setEditingAppt]   = useState<Appt | null>(null)
   const [addons,        setAddons]        = useState<ServiceAddon[]>([])
@@ -393,7 +394,7 @@ export default function Appointments() {
   function openAdd(date?: string, staffId?: string, startTime?: string) {
     setEditingAppt(null)
     setForm({ ...BLANK, appointment_date: date ?? today, staff_id: staffId ?? '', start_time: startTime ?? '' })
-    setFormErr(''); setModal(true)
+    setFormErr(''); setDblBookWarn(null); setModal(true)
   }
   async function openEdit(a: Appt) {
     const svc = services.find(s => s.id === a.service_id)
@@ -411,7 +412,7 @@ export default function Appointments() {
       group_id: a.group_id ?? undefined,
       addonIds: [],
     })
-    setFormErr(''); setModal(true)
+    setFormErr(''); setDblBookWarn(null); setModal(true)
     // Load existing add-ons for this appointment
     const { data } = await supabase.from('appointment_addons').select('addon_id').eq('appointment_id', a.id)
     setForm(f => f.id === a.id ? { ...f, addonIds: (data ?? []).map((r: { addon_id: string }) => r.addon_id) } : f)
@@ -444,13 +445,13 @@ export default function Appointments() {
       extra_customers: extraCust,
     }))
   }
-  async function save() {
+  async function save(force = false) {
     if (!form.customer_id)      { setFormErr(t('Select a customer.', 'Seleccione un cliente.')); return }
     if (!form.service_id)       { setFormErr(t('Select a service.', 'Seleccione un servicio.')); return }
     if (!form.staff_id)         { setFormErr(t('Select a provider.', 'Seleccione un proveedor.')); return }
     if (!form.appointment_date) { setFormErr(t('Date is required.', 'La fecha es requerida.')); return }
     if (!form.start_time)       { setFormErr(t('Time is required.', 'La hora es requerida.')); return }
-    setSaving(true); setFormErr('')
+    setSaving(true); setFormErr(''); setDblBookWarn(null)
     try {
       const durMin   = parseInt(form.duration_minutes) || 60
       if (durMin <= 0) { setFormErr(t('Duration must be a positive number of minutes.', 'La duración debe ser un número positivo de minutos.')); return }
@@ -458,9 +459,11 @@ export default function Appointments() {
       const newStart = sh * 60 + sm, newEnd = newStart + durMin
       // How many resource slots this booking will consume (1 per party member)
       const slotsNeeded = !form.id ? 1 + form.extra_staff.length : 1
+      // Cancelling / marking no-show frees the slot — conflict checks must not block it
+      const isActiveBooking = form.status !== 'cancelled' && form.status !== 'no_show'
 
       // Resource availability check — accounts for all slots in a multi-party booking
-      if (form.resource_id && form.appointment_date && form.start_time) {
+      if (isActiveBooking && form.resource_id && form.appointment_date && form.start_time) {
         const resource = resources.find(r => r.id === form.resource_id)
         const { data: existing } = await supabase
           .from('appointments')
@@ -496,7 +499,7 @@ export default function Appointments() {
 
       // Time block check — runs for every provider in the booking
       const allStaffIds = [form.staff_id, ...form.extra_staff.filter(Boolean)]
-      if (form.appointment_date && form.start_time) {
+      if (isActiveBooking && form.appointment_date && form.start_time) {
         const { data: blocks } = await supabase
           .from('time_blocks')
           .select('staff_id, start_time, end_time, label')
@@ -514,6 +517,43 @@ export default function Appointments() {
           setFormErr(t(
             `${staff?.name ?? 'Provider'} is blocked during this time (${blockHit.label}: ${fmtTime(blockHit.start_time)} – ${fmtTime(blockHit.end_time)}).`,
             `${staff?.name ?? 'Proveedor'} está bloqueado durante este horario (${blockHit.label}: ${fmtTime(blockHit.start_time)} – ${fmtTime(blockHit.end_time)}).`
+          ))
+          setSaving(false); return
+        }
+      }
+
+      // A multi-party booking needs a distinct provider per slot
+      if (new Set(allStaffIds).size !== allStaffIds.length) {
+        setFormErr(t('Each party member needs a different provider.', 'Cada miembro del grupo necesita un proveedor diferente.'))
+        setSaving(false); return
+      }
+
+      // Staff double-booking check — warns, but the user can explicitly double-book
+      if (!force && isActiveBooking) {
+        const { data: sameDay } = await supabase
+          .from('appointments')
+          .select('id, staff_id, start_time, duration_minutes, group_id, customers(first_name, middle_name, last_name)')
+          .eq('client_id', CLIENT_ID)
+          .eq('appointment_date', form.appointment_date)
+          .in('staff_id', allStaffIds)
+          .in('status', ['scheduled', 'checked_in', 'completed'])
+          .limit(200)
+        const clash = (sameDay ?? []).find(a => {
+          if (form.id && (a.id === form.id || (form.group_id && a.group_id === form.group_id))) return false
+          const [ah, am] = a.start_time.split(':').map(Number)
+          const aStart = ah * 60 + am, aEnd = aStart + a.duration_minutes
+          return newStart < aEnd && newEnd > aStart
+        })
+        if (clash) {
+          const staff = staffList.find(s => s.id === clash.staff_id)
+          // supabase-js types a to-one embed as an array without generated DB types
+          const cust = (Array.isArray(clash.customers) ? clash.customers[0] ?? null : clash.customers) as Appt['customers']
+          const [ch, cm] = clash.start_time.split(':').map(Number)
+          const cEnd = ch * 60 + cm + clash.duration_minutes
+          const endStr = `${String(Math.floor(cEnd / 60) % 24).padStart(2, '0')}:${String(cEnd % 60).padStart(2, '0')}`
+          setDblBookWarn(t(
+            `${staff?.name ?? 'This provider'} already has ${custName(cust)} from ${fmtTime(clash.start_time)} to ${fmtTime(endStr)}.`,
+            `${staff?.name ?? 'El proveedor'} ya tiene a ${custName(cust)} de ${fmtTime(clash.start_time)} a ${fmtTime(endStr)}.`
           ))
           setSaving(false); return
         }
@@ -829,7 +869,7 @@ export default function Appointments() {
                             duration_minutes: String(findTime.duration_minutes),
                             price_charged: svc ? String(svc.price) : '',
                           })
-                          setFormErr(''); setModal(true)
+                          setFormErr(''); setDblBookWarn(null); setModal(true)
                         } else {
                           openAdd(dayDate, s.id, timeStr)
                         }
@@ -1345,6 +1385,19 @@ export default function Appointments() {
                 <div style={{ gridColumn: '1 / -1' }}><label style={lbl}>{t('Square Transaction ID', 'ID de Transacción Square')}</label><input value={form.square_transaction_id} onChange={e => setForm(f => ({ ...f, square_transaction_id: e.target.value }))} placeholder={t('Optional', 'Opcional')} style={inp} /></div>
                 <div style={{ gridColumn: '1 / -1' }}><label style={lbl}>{t('Notes', 'Notas')}</label><textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder={t('Session notes, client feedback, etc.', 'Notas de sesión, comentarios del cliente, etc.')} rows={2} style={{ ...inp, resize: 'vertical', fontFamily: 'inherit' }} /></div>
                 {formErr && <div style={{ gridColumn: '1 / -1', color: D.red, fontSize: 12 }}>{formErr}</div>}
+                {dblBookWarn && (
+                  <div style={{ gridColumn: '1 / -1', background: '#B8740010', border: '1px solid #B8740040', borderRadius: 6, padding: '10px 12px' }}>
+                    <div style={{ color: '#B87400', fontSize: 12.5, fontWeight: 600 }}>{dblBookWarn}</div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 9 }}>
+                      <button onClick={() => save(true)} disabled={saving} style={{ background: '#B87400', color: '#fff', border: 'none', borderRadius: 5, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                        {t('Double-book anyway', 'Reservar doble de todos modos')}
+                      </button>
+                      <button onClick={() => setDblBookWarn(null)} style={{ background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 5, padding: '5px 12px', fontSize: 12, cursor: 'pointer', color: D.charcoal }}>
+                        {t('Change time', 'Cambiar hora')}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
             <div style={{ padding: '14px 24px', borderTop: `1px solid ${D.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1370,7 +1423,7 @@ export default function Appointments() {
                     {t('Check Out', 'Finalizar')}
                   </button>
                 )}
-                <button onClick={save} disabled={saving} style={{ background: D.sage, color: '#fff', border: 'none', borderRadius: 6, padding: '8px 18px', fontSize: 13, fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.7 : 1 }}>
+                <button onClick={() => save()} disabled={saving} style={{ background: D.sage, color: '#fff', border: 'none', borderRadius: 6, padding: '8px 18px', fontSize: 13, fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.7 : 1 }}>
                   {saving ? t('Saving…', 'Guardando…') : (form.id ? t('Save Changes', 'Guardar Cambios') : t('Book Appointment', 'Reservar Cita'))}
                 </button>
               </div>
