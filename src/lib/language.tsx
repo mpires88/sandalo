@@ -13,7 +13,7 @@ interface LanguageCtx {
 const LanguageContext = createContext<LanguageCtx>({
   lang: 'en',
   setLang: () => {},
-  t: (en) => en,
+  t: en => en,
 })
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
@@ -33,11 +33,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     return lang === 'es' ? es : en
   }
 
-  return (
-    <LanguageContext.Provider value={{ lang, setLang, t }}>
-      {children}
-    </LanguageContext.Provider>
-  )
+  return <LanguageContext.Provider value={{ lang, setLang, t }}>{children}</LanguageContext.Provider>
 }
 
 export function useLanguage() {

@@ -12,9 +12,7 @@ export default function AdminOnly({ children }: { children: React.ReactNode }) {
     return (
       <div style={{ padding: '60px 32px', textAlign: 'center' }}>
         <div style={{ fontSize: 15, fontWeight: 700, color: D.charcoal, marginBottom: 6 }}>Admins only</div>
-        <div style={{ fontSize: 13, color: D.muted }}>
-          Only administrators can manage users and permissions.
-        </div>
+        <div style={{ fontSize: 13, color: D.muted }}>Only administrators can manage users and permissions.</div>
       </div>
     )
   }

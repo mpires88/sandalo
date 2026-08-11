@@ -3,15 +3,18 @@
 //   import { localDb as supabase } from '@/lib/localDb'
 //   import { supabase }            from '@/lib/supabase'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// biome-ignore lint/suspicious/noExplicitAny: mirrors supabase's loosely-typed rows
 type Row = Record<string, any>
-type DbResponse<T> = { data: T | null; error: { message: string } | null }
+// biome-ignore lint/suspicious/noExplicitAny: mirrors supabase's loosely-typed results
+type DbResult = { data: any; error: any }
 
 function getTable(name: string): Row[] {
   if (typeof window === 'undefined') return []
   try {
     return JSON.parse(localStorage.getItem(`sandalo_db_${name}`) ?? '[]')
-  } catch { return [] }
+  } catch {
+    return []
+  }
 }
 
 function setTable(name: string, rows: Row[]): void {
@@ -118,9 +121,11 @@ class QueryBuilder {
     if (this._op === 'select') {
       let rows = table.filter(match)
       if (this._orderField) {
-        const field = this._orderField, asc = this._orderAsc
+        const field = this._orderField,
+          asc = this._orderAsc
         rows = [...rows].sort((a, b) => {
-          const av = a[field], bv = b[field]
+          const av = a[field],
+            bv = b[field]
           if (av === bv) return 0
           if (av == null) return asc ? -1 : 1
           if (bv == null) return asc ? 1 : -1
@@ -138,8 +143,7 @@ class QueryBuilder {
     }
 
     if (this._op === 'insert') {
-      const incoming = (Array.isArray(this._writePayload)
-        ? this._writePayload : [this._writePayload]) as Row[]
+      const incoming = (Array.isArray(this._writePayload) ? this._writePayload : [this._writePayload]) as Row[]
       const stamped = incoming.map(r => ({ id: genId(), ...r }))
       setTable(this._table, [...table, ...stamped])
       return stamped
@@ -161,17 +165,14 @@ class QueryBuilder {
     }
 
     if (this._op === 'upsert') {
-      const incoming = (Array.isArray(this._writePayload)
-        ? this._writePayload : [this._writePayload]) as Row[]
+      const incoming = (Array.isArray(this._writePayload) ? this._writePayload : [this._writePayload]) as Row[]
       const conflictFields = this._writeOpts?.onConflict?.split(',').map(s => s.trim()) ?? []
       const ignoreDups = this._writeOpts?.ignoreDuplicates ?? false
       const next = [...table]
       const result: Row[] = []
 
       for (const newRow of incoming) {
-        const idx = conflictFields.length
-          ? next.findIndex(r => conflictFields.every(f => r[f] === newRow[f]))
-          : -1
+        const idx = conflictFields.length ? next.findIndex(r => conflictFields.every(f => r[f] === newRow[f])) : -1
 
         if (idx >= 0) {
           if (!ignoreDups) {
@@ -191,7 +192,10 @@ class QueryBuilder {
     }
 
     if (this._op === 'delete') {
-      setTable(this._table, table.filter(row => !match(row)))
+      setTable(
+        this._table,
+        table.filter(row => !match(row)),
+      )
       return null
     }
 
@@ -199,11 +203,10 @@ class QueryBuilder {
   }
 
   // PromiseLike — makes `await localDb.from(...).select(...)` work
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  then<R1 = { data: any; error: any }, R2 = never>(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    onFulfilled?: ((v: { data: any; error: any }) => R1 | PromiseLike<R1>) | null,
-    onRejected?: ((r: unknown) => R2 | PromiseLike<R2>) | null
+  // biome-ignore lint/suspicious/noThenProperty: intentional thenable mimicking supabase's query builder
+  then<R1 = DbResult, R2 = never>(
+    onFulfilled?: ((v: DbResult) => R1 | PromiseLike<R1>) | null,
+    onRejected?: ((r: unknown) => R2 | PromiseLike<R2>) | null,
   ): Promise<R1 | R2> {
     return Promise.resolve()
       .then(() => {

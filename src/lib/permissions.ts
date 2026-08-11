@@ -1,8 +1,6 @@
 // Permission resources — must match the resources configured in Group Management
 // and the CHECK constraint on group_permissions.resource.
-export const RESOURCES = [
-  'dashboard', 'appointments', 'clients', 'services', 'finance', 'settings',
-] as const
+export const RESOURCES = ['dashboard', 'appointments', 'clients', 'services', 'finance', 'settings'] as const
 
 export type Resource = (typeof RESOURCES)[number]
 export type PermAction = 'read' | 'write'
@@ -15,9 +13,12 @@ export function routeResource(pathname: string): Resource | null {
   if (pathname.startsWith('/clients')) return 'clients'
   if (pathname.startsWith('/services') || pathname.startsWith('/staff')) return 'services'
   if (
-    pathname.startsWith('/accounts') || pathname.startsWith('/transactions') ||
-    pathname.startsWith('/reports') || pathname.startsWith('/loans')
-  ) return 'finance'
+    pathname.startsWith('/accounts') ||
+    pathname.startsWith('/transactions') ||
+    pathname.startsWith('/reports') ||
+    pathname.startsWith('/loans')
+  )
+    return 'finance'
   if (pathname.startsWith('/admin')) return 'settings'
   return null
 }

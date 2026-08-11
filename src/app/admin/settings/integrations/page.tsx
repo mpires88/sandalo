@@ -3,5 +3,9 @@ import SquareIntegration from '@/components/SquareIntegration'
 import AdminOnly from '@/components/AdminOnly'
 
 export default function IntegrationsPage() {
-  return <AdminOnly><SquareIntegration /></AdminOnly>
+  return (
+    <AdminOnly>
+      <SquareIntegration />
+    </AdminOnly>
+  )
 }

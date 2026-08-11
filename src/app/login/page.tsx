@@ -6,21 +6,20 @@ import { supabase } from '@/lib/supabase'
 
 export default function LoginPage() {
   const router = useRouter()
-  const [email,    setEmail]    = useState('')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [loading,  setLoading]  = useState(false)
-  const [error,    setError]    = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!email.trim() || !password) return
-    setLoading(true); setError('')
+    setLoading(true)
+    setError('')
 
     const { error: authErr } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
     if (authErr) {
-      setError(authErr.message === 'Invalid login credentials'
-        ? 'Incorrect email or password.'
-        : authErr.message)
+      setError(authErr.message === 'Invalid login credentials' ? 'Incorrect email or password.' : authErr.message)
       setLoading(false)
       return
     }
@@ -29,16 +28,44 @@ export default function LoginPage() {
   }
 
   return (
-    <div style={{
-      minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: '#F5F0E8', padding: '0 16px',
-    }}>
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#F5F0E8',
+        padding: '0 16px',
+      }}
+    >
       <div style={{ width: '100%', maxWidth: 380 }}>
         {/* Logo / Brand */}
         <div style={{ textAlign: 'center', marginBottom: 36 }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 52, height: 52, borderRadius: 14, background: '#2C5F52', marginBottom: 14 }}>
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#C8A96E" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 52,
+              height: 52,
+              borderRadius: 14,
+              background: '#2C5F52',
+              marginBottom: 14,
+            }}
+          >
+            <svg
+              width="28"
+              height="28"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="#C8A96E"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 2L2 7l10 5 10-5-10-5z" />
+              <path d="M2 17l10 5 10-5" />
+              <path d="M2 12l10 5 10-5" />
             </svg>
           </div>
           <div style={{ fontSize: 22, fontWeight: 700, color: '#2C5F52', letterSpacing: '-0.3px' }}>Sandalo</div>
@@ -46,8 +73,17 @@ export default function LoginPage() {
         </div>
 
         {/* Card */}
-        <div style={{ background: '#fff', borderRadius: 12, padding: '28px 30px', boxShadow: '0 2px 16px rgba(44,95,82,0.10), 0 1px 4px rgba(0,0,0,0.06)' }}>
-          <h1 style={{ fontSize: 16, fontWeight: 700, color: '#4A4A3F', margin: '0 0 22px', textAlign: 'center' }}>Sign in to your account</h1>
+        <div
+          style={{
+            background: '#fff',
+            borderRadius: 12,
+            padding: '28px 30px',
+            boxShadow: '0 2px 16px rgba(44,95,82,0.10), 0 1px 4px rgba(0,0,0,0.06)',
+          }}
+        >
+          <h1 style={{ fontSize: 16, fontWeight: 700, color: '#4A4A3F', margin: '0 0 22px', textAlign: 'center' }}>
+            Sign in to your account
+          </h1>
 
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div>
@@ -63,9 +99,16 @@ export default function LoginPage() {
                 autoComplete="email"
                 placeholder="you@example.com"
                 style={{
-                  width: '100%', padding: '9px 12px', border: '1px solid #D9D4C8',
-                  borderRadius: 7, fontSize: 13.5, color: '#4A4A3F', background: '#fff',
-                  outline: 'none', boxSizing: 'border-box', transition: 'border-color .15s',
+                  width: '100%',
+                  padding: '9px 12px',
+                  border: '1px solid #D9D4C8',
+                  borderRadius: 7,
+                  fontSize: 13.5,
+                  color: '#4A4A3F',
+                  background: '#fff',
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                  transition: 'border-color .15s',
                 }}
                 onFocus={e => (e.target.style.borderColor = '#2C5F52')}
                 onBlur={e => (e.target.style.borderColor = '#D9D4C8')}
@@ -84,9 +127,16 @@ export default function LoginPage() {
                 autoComplete="current-password"
                 placeholder="••••••••"
                 style={{
-                  width: '100%', padding: '9px 12px', border: '1px solid #D9D4C8',
-                  borderRadius: 7, fontSize: 13.5, color: '#4A4A3F', background: '#fff',
-                  outline: 'none', boxSizing: 'border-box', transition: 'border-color .15s',
+                  width: '100%',
+                  padding: '9px 12px',
+                  border: '1px solid #D9D4C8',
+                  borderRadius: 7,
+                  fontSize: 13.5,
+                  color: '#4A4A3F',
+                  background: '#fff',
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                  transition: 'border-color .15s',
                 }}
                 onFocus={e => (e.target.style.borderColor = '#2C5F52')}
                 onBlur={e => (e.target.style.borderColor = '#D9D4C8')}
@@ -94,7 +144,16 @@ export default function LoginPage() {
             </div>
 
             {error && (
-              <div style={{ background: '#FDE8E8', border: '1px solid #F5C2C2', borderRadius: 6, padding: '9px 12px', fontSize: 12.5, color: '#991B1B' }}>
+              <div
+                style={{
+                  background: '#FDE8E8',
+                  border: '1px solid #F5C2C2',
+                  borderRadius: 6,
+                  padding: '9px 12px',
+                  fontSize: 12.5,
+                  color: '#991B1B',
+                }}
+              >
                 {error}
               </div>
             )}
@@ -103,10 +162,16 @@ export default function LoginPage() {
               type="submit"
               disabled={loading || !email || !password}
               style={{
-                width: '100%', padding: '10px', marginTop: 4,
+                width: '100%',
+                padding: '10px',
+                marginTop: 4,
                 background: loading || !email || !password ? '#D9D4C8' : '#2C5F52',
-                color: '#fff', border: 'none', borderRadius: 7,
-                fontSize: 14, fontWeight: 600, cursor: loading || !email || !password ? 'not-allowed' : 'pointer',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 7,
+                fontSize: 14,
+                fontWeight: 600,
+                cursor: loading || !email || !password ? 'not-allowed' : 'pointer',
                 transition: 'background .2s',
               }}
             >

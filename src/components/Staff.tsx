@@ -5,20 +5,26 @@ import { supabase } from '@/lib/supabase'
 import { CLIENT_ID } from '@/constants'
 
 const D = {
-  sage: '#2C5F52', gold: '#C8A96E', charcoal: '#4A4A3F',
-  page: '#F5F0E8', card: '#FAFAF8', border: '#D9D4C8',
-  steel: '#4A7B6A', red: '#B94040', green: '#2E7D52',
+  sage: '#2C5F52',
+  gold: '#C8A96E',
+  charcoal: '#4A4A3F',
+  page: '#F5F0E8',
+  card: '#FAFAF8',
+  border: '#D9D4C8',
+  steel: '#4A7B6A',
+  red: '#B94040',
+  green: '#2E7D52',
   muted: 'rgba(74,74,63,0.55)',
 }
 
 const ROLES = ['Massage Therapist', 'Esthetician', 'Front Desk', 'Event Coordinator'] as const
-type Role = typeof ROLES[number]
+type Role = (typeof ROLES)[number]
 
 const ROLE_COLORS: Record<Role, string> = {
-  'Massage Therapist':  '#2C5F52',
-  'Esthetician':        '#6B5B3E',
-  'Front Desk':         '#4A7B6A',
-  'Event Coordinator':  '#8B7355',
+  'Massage Therapist': '#2C5F52',
+  Esthetician: '#6B5B3E',
+  'Front Desk': '#4A7B6A',
+  'Event Coordinator': '#8B7355',
 }
 
 const LICENSE_TYPES = ['massage', 'esthetics', 'cosmetology', 'other'] as const
@@ -70,50 +76,62 @@ interface LicenseForm {
 }
 
 const BLANK_FORM: StaffForm = {
-  name: '', roles: [], employment_type: 'contractor',
-  commission_rate: '', preferred_language: 'en',
-  phone: '', email: '', status: 'Active',
+  name: '',
+  roles: [],
+  employment_type: 'contractor',
+  commission_rate: '',
+  preferred_language: 'en',
+  phone: '',
+  email: '',
+  status: 'Active',
 }
 
 const BLANK_LICENSE: LicenseForm = {
-  license_type: 'massage', license_number: '',
-  issued_date: '', expiry_date: '', notes: '',
+  license_type: 'massage',
+  license_number: '',
+  issued_date: '',
+  expiry_date: '',
+  notes: '',
 }
 
 export default function Staff() {
-  const [staff, setStaff]     = useState<StaffMember[]>([])
-  const [licenses, setLics]   = useState<Record<string, StaffLicense[]>>({})
+  const [staff, setStaff] = useState<StaffMember[]>([])
+  const [licenses, setLics] = useState<Record<string, StaffLicense[]>>({})
   const [ytdPaid, setYtdPaid] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
-  const [error, setError]     = useState('')
+  const [error, setError] = useState('')
 
-  const [modal, setModal]       = useState(false)
-  const [tab, setTab]           = useState<'profile' | 'licenses'>('profile')
-  const [form, setForm]         = useState<StaffForm>({ ...BLANK_FORM })
-  const [saving, setSaving]     = useState(false)
-  const [formErr, setFormErr]   = useState('')
+  const [modal, setModal] = useState(false)
+  const [tab, setTab] = useState<'profile' | 'licenses'>('profile')
+  const [form, setForm] = useState<StaffForm>({ ...BLANK_FORM })
+  const [saving, setSaving] = useState(false)
+  const [formErr, setFormErr] = useState('')
 
-  const [licForm, setLicForm]         = useState<LicenseForm>({ ...BLANK_LICENSE })
-  const [licSaving, setLicSaving]     = useState(false)
+  const [licForm, setLicForm] = useState<LicenseForm>({ ...BLANK_LICENSE })
+  const [licSaving, setLicSaving] = useState(false)
   const [editingLicId, setEditingLicId] = useState<string | null>(null)
-  const [deleting, setDeleting]       = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const { data, error: err } = await supabase
-        .from('staff').select('*').eq('client_id', CLIENT_ID).order('name')
-      if (err) { setError(err.message); return }
+      const { data, error: err } = await supabase.from('staff').select('*').eq('client_id', CLIENT_ID).order('name')
+      if (err) {
+        setError(err.message)
+        return
+      }
       setStaff(data ?? [])
 
       if (data && data.length > 0) {
         const ids = data.map((m: StaffMember) => m.id)
         const { data: licData } = await supabase
-          .from('staff_licenses').select('*')
-          .eq('client_id', CLIENT_ID).in('staff_id', ids)
+          .from('staff_licenses')
+          .select('*')
+          .eq('client_id', CLIENT_ID)
+          .in('staff_id', ids)
           .order('expiry_date', { ascending: true })
         const grouped: Record<string, StaffLicense[]> = {}
-        for (const l of (licData ?? [])) {
+        for (const l of licData ?? []) {
           if (!grouped[l.staff_id]) grouped[l.staff_id] = []
           grouped[l.staff_id].push(l)
         }
@@ -122,10 +140,13 @@ export default function Staff() {
         const yearStart = `${new Date().getFullYear()}-01-01`
         const names = data.map((m: StaffMember) => m.name)
         const { data: txnData } = await supabase
-          .from('bank_transactions').select('account, amount')
-          .eq('client_id', CLIENT_ID).gte('transaction_date', yearStart).in('account', names)
+          .from('bank_transactions')
+          .select('account, amount')
+          .eq('client_id', CLIENT_ID)
+          .gte('transaction_date', yearStart)
+          .in('account', names)
         const ytd: Record<string, number> = {}
-        for (const t of (txnData ?? [])) {
+        for (const t of txnData ?? []) {
           ytd[t.account] = (ytd[t.account] ?? 0) + Math.abs(parseFloat(t.amount) || 0)
         }
         setYtdPaid(ytd)
@@ -135,7 +156,9 @@ export default function Staff() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+  }, [load])
 
   function openAdd() {
     setForm({ ...BLANK_FORM })
@@ -145,13 +168,16 @@ export default function Staff() {
   }
 
   function openEdit(m: StaffMember) {
-    const roles = m.roles?.length ? m.roles : (m.role ? [m.role] : [])
+    const roles = m.roles?.length ? m.roles : m.role ? [m.role] : []
     setForm({
-      id: m.id, name: m.name, roles,
+      id: m.id,
+      name: m.name,
+      roles,
       employment_type: m.employment_type || 'contractor',
       commission_rate: m.commission_rate != null ? String(m.commission_rate) : '',
       preferred_language: m.preferred_language || 'en',
-      phone: m.phone || '', email: m.email || '',
+      phone: m.phone || '',
+      email: m.email || '',
       status: m.status || 'Active',
     })
     setFormErr('')
@@ -169,8 +195,12 @@ export default function Staff() {
   }
 
   async function save() {
-    if (!form.name.trim()) { setFormErr('Name is required.'); return }
-    setSaving(true); setFormErr('')
+    if (!form.name.trim()) {
+      setFormErr('Name is required.')
+      return
+    }
+    setSaving(true)
+    setFormErr('')
     try {
       const payload = {
         name: form.name.trim(),
@@ -186,24 +216,42 @@ export default function Staff() {
 
       if (form.id) {
         const { error: err } = await supabase.from('staff').update(payload).eq('id', form.id)
-        if (err) { setFormErr(err.message); return }
+        if (err) {
+          setFormErr(err.message)
+          return
+        }
         const existing = staff.find(m => m.id === form.id)
         if (existing && existing.name !== payload.name) {
-          await supabase.from('categories')
+          await supabase
+            .from('categories')
             .update({ name: payload.name })
-            .eq('staff_id', form.id).eq('client_id', CLIENT_ID)
+            .eq('staff_id', form.id)
+            .eq('client_id', CLIENT_ID)
         }
       } else {
         const { data: created, error: err } = await supabase
-          .from('staff').insert({ client_id: CLIENT_ID, ...payload }).select('id').single()
-        if (err) { setFormErr(err.message); return }
+          .from('staff')
+          .insert({ client_id: CLIENT_ID, ...payload })
+          .select('id')
+          .single()
+        if (err) {
+          setFormErr(err.message)
+          return
+        }
         if (created?.id) {
-          const { data: maxData } = await supabase.from('categories').select('sort_order')
-            .eq('client_id', CLIENT_ID).order('sort_order', { ascending: false }).limit(1).single()
+          const { data: maxData } = await supabase
+            .from('categories')
+            .select('sort_order')
+            .eq('client_id', CLIENT_ID)
+            .order('sort_order', { ascending: false })
+            .limit(1)
+            .single()
           await supabase.from('categories').insert({
-            client_id: CLIENT_ID, name: payload.name,
+            client_id: CLIENT_ID,
+            name: payload.name,
             sort_order: (maxData?.sort_order ?? 0) + 10,
-            pl_section: 'Operating Expenses', parent: 'Therapist Compensation',
+            pl_section: 'Operating Expenses',
+            parent: 'Therapist Compensation',
             staff_id: created.id,
           })
         }
@@ -281,11 +329,12 @@ export default function Staff() {
     return { label: `${lics.length} active`, color: D.green }
   }
 
-  if (loading) return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 200, color: D.muted }}>
-      Loading…
-    </div>
-  )
+  if (loading)
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 200, color: D.muted }}>
+        Loading…
+      </div>
+    )
   if (error) return <div style={{ padding: 32, color: D.red }}>{error}</div>
 
   const active = staff.filter(m => m.status === 'Active').length
@@ -300,10 +349,19 @@ export default function Staff() {
             {active} active · {staff.length} total
           </p>
         </div>
-        <button onClick={openAdd} style={{
-          background: D.sage, color: '#fff', border: 'none', borderRadius: 6,
-          padding: '8px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer',
-        }}>
+        <button
+          onClick={openAdd}
+          style={{
+            background: D.sage,
+            color: '#fff',
+            border: 'none',
+            borderRadius: 6,
+            padding: '8px 16px',
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
           + Add Staff
         </button>
       </div>
@@ -318,23 +376,35 @@ export default function Staff() {
             <thead>
               <tr style={{ background: '#F0EBE0', borderBottom: `1px solid ${D.border}` }}>
                 {['Name', 'Roles', 'Lang', 'Type', 'Phone', 'Licenses', 'YTD Paid', ''].map(h => (
-                  <th key={h} style={{
-                    padding: '10px 14px', textAlign: 'left', fontWeight: 600,
-                    color: D.charcoal, fontSize: 11.5, whiteSpace: 'nowrap',
-                  }}>{h}</th>
+                  <th
+                    key={h}
+                    style={{
+                      padding: '10px 14px',
+                      textAlign: 'left',
+                      fontWeight: 600,
+                      color: D.charcoal,
+                      fontSize: 11.5,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {h}
+                  </th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {staff.map((m, i) => {
-                const displayRoles = m.roles?.length ? m.roles : (m.role ? [m.role] : [])
+                const displayRoles = m.roles?.length ? m.roles : m.role ? [m.role] : []
                 const licBadge = licSummary(m.id)
                 return (
-                  <tr key={m.id} style={{
-                    borderBottom: i < staff.length - 1 ? `1px solid ${D.border}` : 'none',
-                    background: i % 2 === 0 ? D.card : '#F7F4EE',
-                    opacity: m.status === 'Inactive' ? 0.5 : 1,
-                  }}>
+                  <tr
+                    key={m.id}
+                    style={{
+                      borderBottom: i < staff.length - 1 ? `1px solid ${D.border}` : 'none',
+                      background: i % 2 === 0 ? D.card : '#F7F4EE',
+                      opacity: m.status === 'Inactive' ? 0.5 : 1,
+                    }}
+                  >
                     <td style={{ padding: '10px 14px', fontWeight: 600, color: D.charcoal }}>
                       {m.name}
                       {m.status === 'Inactive' && (
@@ -345,42 +415,66 @@ export default function Staff() {
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         {displayRoles.length === 0 ? (
                           <span style={{ color: D.muted }}>—</span>
-                        ) : displayRoles.map(r => {
-                          const c = (ROLE_COLORS as Record<string, string>)[r] ?? '#888'
-                          return (
-                            <span key={r} style={{
-                              background: c + '18', color: c,
-                              border: `1px solid ${c}40`,
-                              borderRadius: 4, padding: '2px 7px', fontSize: 11, fontWeight: 500,
-                            }}>{r}</span>
-                          )
-                        })}
+                        ) : (
+                          displayRoles.map(r => {
+                            const c = (ROLE_COLORS as Record<string, string>)[r] ?? '#888'
+                            return (
+                              <span
+                                key={r}
+                                style={{
+                                  background: c + '18',
+                                  color: c,
+                                  border: `1px solid ${c}40`,
+                                  borderRadius: 4,
+                                  padding: '2px 7px',
+                                  fontSize: 11,
+                                  fontWeight: 500,
+                                }}
+                              >
+                                {r}
+                              </span>
+                            )
+                          })
+                        )}
                       </div>
                     </td>
                     <td style={{ padding: '10px 14px' }}>
-                      <span style={{
-                        background: m.preferred_language === 'es' ? D.gold + '28' : D.sage + '1A',
-                        color: m.preferred_language === 'es' ? '#8B6914' : D.sage,
-                        border: `1px solid ${m.preferred_language === 'es' ? D.gold + '70' : D.sage + '50'}`,
-                        borderRadius: 4, padding: '2px 7px', fontSize: 11, fontWeight: 700,
-                      }}>
+                      <span
+                        style={{
+                          background: m.preferred_language === 'es' ? D.gold + '28' : D.sage + '1A',
+                          color: m.preferred_language === 'es' ? '#8B6914' : D.sage,
+                          border: `1px solid ${m.preferred_language === 'es' ? D.gold + '70' : D.sage + '50'}`,
+                          borderRadius: 4,
+                          padding: '2px 7px',
+                          fontSize: 11,
+                          fontWeight: 700,
+                        }}
+                      >
                         {(m.preferred_language || 'en').toUpperCase()}
                       </span>
                     </td>
                     <td style={{ padding: '10px 14px', color: D.muted, fontSize: 12 }}>
                       {m.employment_type === 'employee' ? 'Employee' : 'Contractor'}
                     </td>
-                    <td style={{ padding: '10px 14px', color: m.phone ? D.charcoal : D.muted }}>
-                      {m.phone || '—'}
-                    </td>
+                    <td style={{ padding: '10px 14px', color: m.phone ? D.charcoal : D.muted }}>{m.phone || '—'}</td>
                     <td style={{ padding: '10px 14px' }}>
                       {licBadge ? (
-                        <span style={{
-                          background: licBadge.color + '18', color: licBadge.color,
-                          border: `1px solid ${licBadge.color}40`,
-                          borderRadius: 4, padding: '2px 7px', fontSize: 11, fontWeight: 500,
-                        }}>{licBadge.label}</span>
-                      ) : <span style={{ color: D.muted }}>—</span>}
+                        <span
+                          style={{
+                            background: licBadge.color + '18',
+                            color: licBadge.color,
+                            border: `1px solid ${licBadge.color}40`,
+                            borderRadius: 4,
+                            padding: '2px 7px',
+                            fontSize: 11,
+                            fontWeight: 500,
+                          }}
+                        >
+                          {licBadge.label}
+                        </span>
+                      ) : (
+                        <span style={{ color: D.muted }}>—</span>
+                      )}
                     </td>
                     <td style={{ padding: '10px 14px', fontWeight: 600, color: ytdPaid[m.name] ? D.sage : D.muted }}>
                       {ytdPaid[m.name]
@@ -388,10 +482,17 @@ export default function Staff() {
                         : '—'}
                     </td>
                     <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                      <button onClick={() => openEdit(m)} style={actionBtn}>Edit</button>
-                      <button onClick={() => removeStaff(m.id)} disabled={deleting === m.id} style={{
-                        ...dangerBtn, opacity: deleting === m.id ? 0.5 : 1,
-                      }}>
+                      <button onClick={() => openEdit(m)} style={actionBtn}>
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => removeStaff(m.id)}
+                        disabled={deleting === m.id}
+                        style={{
+                          ...dangerBtn,
+                          opacity: deleting === m.id ? 0.5 : 1,
+                        }}
+                      >
                         {deleting === m.id ? '…' : 'Remove'}
                       </button>
                     </td>
@@ -404,15 +505,32 @@ export default function Staff() {
       </div>
 
       {modal && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
-        }} onClick={e => { if (e.target === e.currentTarget) setModal(false) }}>
-          <div style={{
-            background: '#fff', borderRadius: 10, width: 520, maxWidth: '95vw',
-            maxHeight: '90vh', display: 'flex', flexDirection: 'column',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
-          }}>
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 100,
+          }}
+          onClick={e => {
+            if (e.target === e.currentTarget) setModal(false)
+          }}
+        >
+          <div
+            style={{
+              background: '#fff',
+              borderRadius: 10,
+              width: 520,
+              maxWidth: '95vw',
+              maxHeight: '90vh',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+            }}
+          >
             {/* Header */}
             <div style={{ padding: '20px 24px 0', borderBottom: `1px solid ${D.border}` }}>
               <h2 style={{ margin: '0 0 14px', fontSize: 17, fontWeight: 700, color: D.charcoal }}>
@@ -421,17 +539,22 @@ export default function Staff() {
               {form.id && (
                 <div style={{ display: 'flex' }}>
                   {(['profile', 'licenses'] as const).map(t => (
-                    <button key={t} onClick={() => setTab(t)} style={{
-                      background: 'none', border: 'none',
-                      borderBottom: tab === t ? `2px solid ${D.sage}` : '2px solid transparent',
-                      padding: '6px 14px', fontSize: 13,
-                      fontWeight: tab === t ? 600 : 400,
-                      color: tab === t ? D.sage : D.muted,
-                      cursor: 'pointer', textTransform: 'capitalize',
-                    }}>
-                      {t === 'licenses'
-                        ? `Licenses${currentLics.length ? ` (${currentLics.length})` : ''}`
-                        : 'Profile'}
+                    <button
+                      key={t}
+                      onClick={() => setTab(t)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        borderBottom: tab === t ? `2px solid ${D.sage}` : '2px solid transparent',
+                        padding: '6px 14px',
+                        fontSize: 13,
+                        fontWeight: tab === t ? 600 : 400,
+                        color: tab === t ? D.sage : D.muted,
+                        cursor: 'pointer',
+                        textTransform: 'capitalize',
+                      }}
+                    >
+                      {t === 'licenses' ? `Licenses${currentLics.length ? ` (${currentLics.length})` : ''}` : 'Profile'}
                     </button>
                   ))}
                 </div>
@@ -444,8 +567,12 @@ export default function Staff() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px 16px' }}>
                   <div style={{ gridColumn: '1 / -1' }}>
                     <label style={lbl}>Name *</label>
-                    <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                      placeholder="Full name" style={inp} />
+                    <input
+                      value={form.name}
+                      onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                      placeholder="Full name"
+                      style={inp}
+                    />
                   </div>
 
                   <div style={{ gridColumn: '1 / -1' }}>
@@ -454,13 +581,23 @@ export default function Staff() {
                       {ROLES.map(r => {
                         const on = form.roles.includes(r)
                         return (
-                          <button key={r} type="button" onClick={() => toggleRole(r)} style={{
-                            background: on ? D.sage : 'transparent',
-                            color: on ? '#fff' : D.charcoal,
-                            border: `1px solid ${on ? D.sage : D.border}`,
-                            borderRadius: 6, padding: '5px 12px', fontSize: 12.5,
-                            fontWeight: on ? 600 : 400, cursor: 'pointer',
-                          }}>{r}</button>
+                          <button
+                            key={r}
+                            type="button"
+                            onClick={() => toggleRole(r)}
+                            style={{
+                              background: on ? D.sage : 'transparent',
+                              color: on ? '#fff' : D.charcoal,
+                              border: `1px solid ${on ? D.sage : D.border}`,
+                              borderRadius: 6,
+                              padding: '5px 12px',
+                              fontSize: 12.5,
+                              fontWeight: on ? 600 : 400,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {r}
+                          </button>
                         )
                       })}
                     </div>
@@ -468,8 +605,11 @@ export default function Staff() {
 
                   <div>
                     <label style={lbl}>Employment Type</label>
-                    <select value={form.employment_type}
-                      onChange={e => setForm(f => ({ ...f, employment_type: e.target.value }))} style={inp}>
+                    <select
+                      value={form.employment_type}
+                      onChange={e => setForm(f => ({ ...f, employment_type: e.target.value }))}
+                      style={inp}
+                    >
                       <option value="contractor">Contractor</option>
                       <option value="employee">Employee</option>
                     </select>
@@ -477,15 +617,24 @@ export default function Staff() {
 
                   <div>
                     <label style={lbl}>Commission %</label>
-                    <input type="number" min={0} max={100} value={form.commission_rate}
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={form.commission_rate}
                       onChange={e => setForm(f => ({ ...f, commission_rate: e.target.value }))}
-                      placeholder="e.g. 40" style={inp} />
+                      placeholder="e.g. 40"
+                      style={inp}
+                    />
                   </div>
 
                   <div>
                     <label style={lbl}>Language</label>
-                    <select value={form.preferred_language}
-                      onChange={e => setForm(f => ({ ...f, preferred_language: e.target.value }))} style={inp}>
+                    <select
+                      value={form.preferred_language}
+                      onChange={e => setForm(f => ({ ...f, preferred_language: e.target.value }))}
+                      style={inp}
+                    >
                       <option value="en">English</option>
                       <option value="es">Spanish</option>
                     </select>
@@ -493,8 +642,11 @@ export default function Staff() {
 
                   <div>
                     <label style={lbl}>Status</label>
-                    <select value={form.status}
-                      onChange={e => setForm(f => ({ ...f, status: e.target.value }))} style={inp}>
+                    <select
+                      value={form.status}
+                      onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
+                      style={inp}
+                    >
                       <option value="Active">Active</option>
                       <option value="Inactive">Inactive</option>
                     </select>
@@ -502,19 +654,25 @@ export default function Staff() {
 
                   <div>
                     <label style={lbl}>Phone</label>
-                    <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
-                      placeholder="(617) 555-0000" style={inp} />
+                    <input
+                      value={form.phone}
+                      onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
+                      placeholder="(617) 555-0000"
+                      style={inp}
+                    />
                   </div>
 
                   <div>
                     <label style={lbl}>Email</label>
-                    <input value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                      placeholder="name@example.com" style={inp} />
+                    <input
+                      value={form.email}
+                      onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+                      placeholder="name@example.com"
+                      style={inp}
+                    />
                   </div>
 
-                  {formErr && (
-                    <div style={{ gridColumn: '1 / -1', color: D.red, fontSize: 12 }}>{formErr}</div>
-                  )}
+                  {formErr && <div style={{ gridColumn: '1 / -1', color: D.red, fontSize: 12 }}>{formErr}</div>}
                 </div>
               ) : (
                 /* Licenses tab */
@@ -524,46 +682,83 @@ export default function Staff() {
                       {currentLics.map(lic => {
                         const st = licStatus(lic)
                         return (
-                          <div key={lic.id} style={{
-                            display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
-                            padding: '10px 12px', border: `1px solid ${D.border}`, borderRadius: 6,
-                            marginBottom: 8, background: D.card,
-                          }}>
+                          <div
+                            key={lic.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'flex-start',
+                              justifyContent: 'space-between',
+                              padding: '10px 12px',
+                              border: `1px solid ${D.border}`,
+                              borderRadius: 6,
+                              marginBottom: 8,
+                              background: D.card,
+                            }}
+                          >
                             <div>
                               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
-                                <span style={{ fontSize: 13, fontWeight: 600, color: D.charcoal, textTransform: 'capitalize' }}>
+                                <span
+                                  style={{
+                                    fontSize: 13,
+                                    fontWeight: 600,
+                                    color: D.charcoal,
+                                    textTransform: 'capitalize',
+                                  }}
+                                >
                                   {lic.license_type}
                                 </span>
-                                <span style={{
-                                  background: st.color + '18', color: st.color,
-                                  border: `1px solid ${st.color}40`,
-                                  borderRadius: 4, padding: '1px 6px', fontSize: 10.5, fontWeight: 600,
-                                }}>{st.label}</span>
+                                <span
+                                  style={{
+                                    background: st.color + '18',
+                                    color: st.color,
+                                    border: `1px solid ${st.color}40`,
+                                    borderRadius: 4,
+                                    padding: '1px 6px',
+                                    fontSize: 10.5,
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {st.label}
+                                </span>
                               </div>
                               {lic.license_number && (
                                 <div style={{ fontSize: 12, color: D.muted }}>#{lic.license_number}</div>
                               )}
                               {lic.expiry_date && (
                                 <div style={{ fontSize: 11.5, color: D.muted }}>
-                                  Expires {new Date(lic.expiry_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                                  Expires{' '}
+                                  {new Date(lic.expiry_date + 'T00:00:00').toLocaleDateString('en-US', {
+                                    month: 'short',
+                                    day: 'numeric',
+                                    year: 'numeric',
+                                  })}
                                 </div>
                               )}
                               {lic.notes && (
-                                <div style={{ fontSize: 11.5, color: D.muted, fontStyle: 'italic', marginTop: 2 }}>{lic.notes}</div>
+                                <div style={{ fontSize: 11.5, color: D.muted, fontStyle: 'italic', marginTop: 2 }}>
+                                  {lic.notes}
+                                </div>
                               )}
                             </div>
                             <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                              <button onClick={() => {
-                                setEditingLicId(lic.id)
-                                setLicForm({
-                                  license_type: lic.license_type,
-                                  license_number: lic.license_number || '',
-                                  issued_date: lic.issued_date || '',
-                                  expiry_date: lic.expiry_date || '',
-                                  notes: lic.notes || '',
-                                })
-                              }} style={actionBtn}>Edit</button>
-                              <button onClick={() => deleteLicense(lic.id)} style={dangerBtn}>Remove</button>
+                              <button
+                                onClick={() => {
+                                  setEditingLicId(lic.id)
+                                  setLicForm({
+                                    license_type: lic.license_type,
+                                    license_number: lic.license_number || '',
+                                    issued_date: lic.issued_date || '',
+                                    expiry_date: lic.expiry_date || '',
+                                    notes: lic.notes || '',
+                                  })
+                                }}
+                                style={actionBtn}
+                              >
+                                Edit
+                              </button>
+                              <button onClick={() => deleteLicense(lic.id)} style={dangerBtn}>
+                                Remove
+                              </button>
                             </div>
                           </div>
                         )
@@ -572,62 +767,114 @@ export default function Staff() {
                   )}
 
                   {/* License form */}
-                  <div style={{
-                    border: `1px solid ${D.border}`, borderRadius: 6,
-                    padding: '14px 16px', background: D.page,
-                  }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12 }}>
+                  <div
+                    style={{
+                      border: `1px solid ${D.border}`,
+                      borderRadius: 6,
+                      padding: '14px 16px',
+                      background: D.page,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: D.muted,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.8px',
+                        marginBottom: 12,
+                      }}
+                    >
                       {editingLicId ? 'Edit License' : 'Add License'}
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 12px' }}>
                       <div>
                         <label style={lbl}>License Type</label>
-                        <select value={licForm.license_type}
-                          onChange={e => setLicForm(f => ({ ...f, license_type: e.target.value }))} style={inp}>
+                        <select
+                          value={licForm.license_type}
+                          onChange={e => setLicForm(f => ({ ...f, license_type: e.target.value }))}
+                          style={inp}
+                        >
                           {LICENSE_TYPES.map(t => (
-                            <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>
+                            <option key={t} value={t}>
+                              {t.charAt(0).toUpperCase() + t.slice(1)}
+                            </option>
                           ))}
                         </select>
                       </div>
                       <div>
                         <label style={lbl}>License #</label>
-                        <input value={licForm.license_number}
+                        <input
+                          value={licForm.license_number}
                           onChange={e => setLicForm(f => ({ ...f, license_number: e.target.value }))}
-                          placeholder="e.g. MT-12345" style={inp} />
+                          placeholder="e.g. MT-12345"
+                          style={inp}
+                        />
                       </div>
                       <div>
                         <label style={lbl}>Issued Date</label>
-                        <input type="date" value={licForm.issued_date}
-                          onChange={e => setLicForm(f => ({ ...f, issued_date: e.target.value }))} style={inp} />
+                        <input
+                          type="date"
+                          value={licForm.issued_date}
+                          onChange={e => setLicForm(f => ({ ...f, issued_date: e.target.value }))}
+                          style={inp}
+                        />
                       </div>
                       <div>
                         <label style={lbl}>Expiry Date</label>
-                        <input type="date" value={licForm.expiry_date}
-                          onChange={e => setLicForm(f => ({ ...f, expiry_date: e.target.value }))} style={inp} />
+                        <input
+                          type="date"
+                          value={licForm.expiry_date}
+                          onChange={e => setLicForm(f => ({ ...f, expiry_date: e.target.value }))}
+                          style={inp}
+                        />
                       </div>
                       <div style={{ gridColumn: '1 / -1' }}>
                         <label style={lbl}>Notes</label>
-                        <input value={licForm.notes}
+                        <input
+                          value={licForm.notes}
                           onChange={e => setLicForm(f => ({ ...f, notes: e.target.value }))}
-                          placeholder="e.g. Renewal submitted" style={inp} />
+                          placeholder="e.g. Renewal submitted"
+                          style={inp}
+                        />
                       </div>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
                       {editingLicId && (
-                        <button onClick={() => { setEditingLicId(null); setLicForm({ ...BLANK_LICENSE }) }}
+                        <button
+                          onClick={() => {
+                            setEditingLicId(null)
+                            setLicForm({ ...BLANK_LICENSE })
+                          }}
                           style={{
-                            background: 'transparent', border: `1px solid ${D.border}`,
-                            borderRadius: 5, padding: '6px 14px', fontSize: 12.5,
-                            cursor: 'pointer', color: D.charcoal,
-                          }}>Cancel</button>
+                            background: 'transparent',
+                            border: `1px solid ${D.border}`,
+                            borderRadius: 5,
+                            padding: '6px 14px',
+                            fontSize: 12.5,
+                            cursor: 'pointer',
+                            color: D.charcoal,
+                          }}
+                        >
+                          Cancel
+                        </button>
                       )}
-                      <button onClick={saveLicense} disabled={licSaving} style={{
-                        background: D.sage, color: '#fff', border: 'none',
-                        borderRadius: 5, padding: '6px 14px', fontSize: 12.5,
-                        fontWeight: 600, cursor: licSaving ? 'not-allowed' : 'pointer',
-                        opacity: licSaving ? 0.7 : 1,
-                      }}>
-                        {licSaving ? 'Saving…' : (editingLicId ? 'Update' : 'Add License')}
+                      <button
+                        onClick={saveLicense}
+                        disabled={licSaving}
+                        style={{
+                          background: D.sage,
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: 5,
+                          padding: '6px 14px',
+                          fontSize: 12.5,
+                          fontWeight: 600,
+                          cursor: licSaving ? 'not-allowed' : 'pointer',
+                          opacity: licSaving ? 0.7 : 1,
+                        }}
+                      >
+                        {licSaving ? 'Saving…' : editingLicId ? 'Update' : 'Add License'}
                       </button>
                     </div>
                   </div>
@@ -636,23 +883,46 @@ export default function Staff() {
             </div>
 
             {/* Footer */}
-            <div style={{
-              padding: '14px 24px', borderTop: `1px solid ${D.border}`,
-              display: 'flex', justifyContent: 'flex-end', gap: 10,
-            }}>
-              <button onClick={() => setModal(false)} style={{
-                background: 'transparent', border: `1px solid ${D.border}`,
-                borderRadius: 6, padding: '8px 18px', fontSize: 13,
-                cursor: 'pointer', color: D.charcoal,
-              }}>{tab === 'licenses' ? 'Close' : 'Cancel'}</button>
+            <div
+              style={{
+                padding: '14px 24px',
+                borderTop: `1px solid ${D.border}`,
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 10,
+              }}
+            >
+              <button
+                onClick={() => setModal(false)}
+                style={{
+                  background: 'transparent',
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 6,
+                  padding: '8px 18px',
+                  fontSize: 13,
+                  cursor: 'pointer',
+                  color: D.charcoal,
+                }}
+              >
+                {tab === 'licenses' ? 'Close' : 'Cancel'}
+              </button>
               {tab === 'profile' && (
-                <button onClick={save} disabled={saving} style={{
-                  background: D.sage, color: '#fff', border: 'none',
-                  borderRadius: 6, padding: '8px 18px', fontSize: 13,
-                  fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer',
-                  opacity: saving ? 0.7 : 1,
-                }}>
-                  {saving ? 'Saving…' : (form.id ? 'Save Changes' : 'Add Staff')}
+                <button
+                  onClick={save}
+                  disabled={saving}
+                  style={{
+                    background: D.sage,
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 6,
+                    padding: '8px 18px',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: saving ? 'not-allowed' : 'pointer',
+                    opacity: saving ? 0.7 : 1,
+                  }}
+                >
+                  {saving ? 'Saving…' : form.id ? 'Save Changes' : 'Add Staff'}
                 </button>
               )}
             </div>
@@ -664,24 +934,41 @@ export default function Staff() {
 }
 
 const lbl: React.CSSProperties = {
-  display: 'block', fontSize: 11.5, fontWeight: 600,
-  color: 'rgba(74,74,63,0.7)', marginBottom: 4,
+  display: 'block',
+  fontSize: 11.5,
+  fontWeight: 600,
+  color: 'rgba(74,74,63,0.7)',
+  marginBottom: 4,
 }
 
 const inp: React.CSSProperties = {
-  width: '100%', padding: '7px 10px', fontSize: 13,
-  border: '1px solid #D9D4C8', borderRadius: 5,
-  background: '#fff', color: '#4A4A3F', boxSizing: 'border-box',
+  width: '100%',
+  padding: '7px 10px',
+  fontSize: 13,
+  border: '1px solid #D9D4C8',
+  borderRadius: 5,
+  background: '#fff',
+  color: '#4A4A3F',
+  boxSizing: 'border-box',
 }
 
 const actionBtn: React.CSSProperties = {
-  background: 'transparent', border: '1px solid #D9D4C8',
-  borderRadius: 4, padding: '3px 10px', fontSize: 11.5,
-  cursor: 'pointer', color: '#4A4A3F', marginRight: 6,
+  background: 'transparent',
+  border: '1px solid #D9D4C8',
+  borderRadius: 4,
+  padding: '3px 10px',
+  fontSize: 11.5,
+  cursor: 'pointer',
+  color: '#4A4A3F',
+  marginRight: 6,
 }
 
 const dangerBtn: React.CSSProperties = {
-  background: 'transparent', border: '1px solid rgba(185,64,64,0.35)',
-  borderRadius: 4, padding: '3px 10px', fontSize: 11.5,
-  cursor: 'pointer', color: '#B94040',
+  background: 'transparent',
+  border: '1px solid rgba(185,64,64,0.35)',
+  borderRadius: 4,
+  padding: '3px 10px',
+  fontSize: 11.5,
+  cursor: 'pointer',
+  color: '#B94040',
 }

@@ -2,26 +2,26 @@ export type LoanFrequency = 'monthly' | 'biweekly' | 'weekly' | 'quarterly' | 'd
 export type LoanType = 'amortizing' | 'interest_only' | 'balloon'
 
 export type InstrumentType =
-  | 'term_loan'       // Standard bank term loan
-  | 'sba_loan'        // SBA-backed term loan
-  | 'equipment_loan'  // Equipment financing
-  | 'mca'             // Merchant Cash Advance
-  | 'loc'             // Line of Credit (revolving)
-  | 'revenue_based'   // Revenue-Based Financing
-  | 'flat_fee'        // Pre-computed flat fee loan (e.g. private note with fixed finance charge)
-  | 'friends_family'  // Informal personal loan from friends or family
-  | 'other'           // Any other debt obligation
+  | 'term_loan' // Standard bank term loan
+  | 'sba_loan' // SBA-backed term loan
+  | 'equipment_loan' // Equipment financing
+  | 'mca' // Merchant Cash Advance
+  | 'loc' // Line of Credit (revolving)
+  | 'revenue_based' // Revenue-Based Financing
+  | 'flat_fee' // Pre-computed flat fee loan (e.g. private note with fixed finance charge)
+  | 'friends_family' // Informal personal loan from friends or family
+  | 'other' // Any other debt obligation
 
 export const INSTRUMENT_LABELS: Record<InstrumentType, string> = {
-  term_loan:      'Term Loan',
-  sba_loan:       'SBA Loan',
+  term_loan: 'Term Loan',
+  sba_loan: 'SBA Loan',
   equipment_loan: 'Equipment Financing',
-  mca:            'Merchant Cash Advance',
-  loc:            'Line of Credit',
-  revenue_based:  'Revenue-Based Financing',
-  flat_fee:       'Flat Fee Note',
+  mca: 'Merchant Cash Advance',
+  loc: 'Line of Credit',
+  revenue_based: 'Revenue-Based Financing',
+  flat_fee: 'Flat Fee Note',
   friends_family: 'Friends & Family',
-  other:          'Other',
+  other: 'Other',
 }
 
 // Instruments that use a traditional interest rate (APR)
@@ -63,19 +63,19 @@ export interface Loan {
   instrument_type: InstrumentType
   original_principal: number
   // For interest-bearing instruments (APR)
-  interest_rate?: number      // annual decimal, e.g. 0.065 for 6.5%
+  interest_rate?: number // annual decimal, e.g. 0.065 for 6.5%
   // For flat fee notes — fixed total finance charge agreed at signing
-  total_fee?: number          // dollar amount, e.g. 30000
+  total_fee?: number // dollar amount, e.g. 30000
   // For MCAs and revenue-based financing
-  factor_rate?: number        // total repayment multiplier, e.g. 1.35 means repay 135%
-  holdback_pct?: number       // % of daily/weekly sales withheld (e.g. 0.12 for 12%)
-  start_date: string          // ISO date of first payment
+  factor_rate?: number // total repayment multiplier, e.g. 1.35 means repay 135%
+  holdback_pct?: number // % of daily/weekly sales withheld (e.g. 0.12 for 12%)
+  start_date: string // ISO date of first payment
   term_months: number
-  payment_amount: number      // scheduled periodic payment (estimated for MCAs)
+  payment_amount: number // scheduled periodic payment (estimated for MCAs)
   payment_frequency: LoanFrequency
-  loan_type: LoanType         // only for term_loan, sba_loan, equipment_loan
+  loan_type: LoanType // only for term_loan, sba_loan, equipment_loan
   balloon_amount?: number
-  default_rate?: number        // annual rate charged on unpaid balance after maturity
+  default_rate?: number // annual rate charged on unpaid balance after maturity
   notes?: string
 }
 
@@ -83,11 +83,11 @@ export interface LoanPayment {
   id: string
   client_id: string
   loan_id: string
-  transaction_id?: string     // optional link to bank_transactions row
+  transaction_id?: string // optional link to bank_transactions row
   payment_date: string
   total_amount: number
   principal_amount: number
-  interest_amount: number     // "factor cost" for MCAs
+  interest_amount: number // "factor cost" for MCAs
   fees_amount: number
   notes?: string
 }
@@ -96,7 +96,7 @@ export interface LoanDisbursement {
   id: string
   client_id: string
   loan_id: string
-  transaction_id?: string     // optional link to bank_transactions row
+  transaction_id?: string // optional link to bank_transactions row
   disbursement_date: string
   amount: number
   notes?: string
@@ -104,14 +104,14 @@ export interface LoanDisbursement {
 
 export interface AmortizationRow {
   period: number
-  accrualStart: string  // first day of the accrual period
-  accrualEnd: string    // last day of the accrual period (day before payment)
-  date: string          // payment date
+  accrualStart: string // first day of the accrual period
+  accrualEnd: string // last day of the accrual period (day before payment)
+  date: string // payment date
   payment: number
   principal: number
-  interest: number  // "factor cost" for MCAs
+  interest: number // "factor cost" for MCAs
   balance: number
-  isStub?: boolean  // true for the odd first period when draw date precedes first payment date
+  isStub?: boolean // true for the odd first period when draw date precedes first payment date
 }
 
 // 30/360 day count: assumes 30 days/month, 360 days/year (US Bond Basis)
@@ -125,11 +125,16 @@ export function days30360(d1: string, d2: string): number {
 
 export function periodsPerYear(freq: LoanFrequency): number {
   switch (freq) {
-    case 'daily':     return 365
-    case 'weekly':    return 52
-    case 'biweekly':  return 26
-    case 'monthly':   return 12
-    case 'quarterly': return 4
+    case 'daily':
+      return 365
+    case 'weekly':
+      return 52
+    case 'biweekly':
+      return 26
+    case 'monthly':
+      return 12
+    case 'quarterly':
+      return 4
   }
 }
 
@@ -145,11 +150,11 @@ function addMonths(dateStr: string, months: number): string {
 }
 
 export function addPeriod(dateStr: string, freq: LoanFrequency): string {
-  if (freq === 'monthly')   return addMonths(dateStr, 1)
+  if (freq === 'monthly') return addMonths(dateStr, 1)
   if (freq === 'quarterly') return addMonths(dateStr, 3)
   const d = new Date(dateStr + 'T12:00:00')
-  if (freq === 'daily')    d.setDate(d.getDate() + 1)
-  if (freq === 'weekly')   d.setDate(d.getDate() + 7)
+  if (freq === 'daily') d.setDate(d.getDate() + 1)
+  if (freq === 'weekly') d.setDate(d.getDate() + 7)
   if (freq === 'biweekly') d.setDate(d.getDate() + 14)
   return d.toISOString().slice(0, 10)
 }
@@ -161,11 +166,11 @@ export function dayBefore(dateStr: string): string {
 }
 
 function subPeriod(dateStr: string, freq: LoanFrequency): string {
-  if (freq === 'monthly')   return addMonths(dateStr, -1)
+  if (freq === 'monthly') return addMonths(dateStr, -1)
   if (freq === 'quarterly') return addMonths(dateStr, -3)
   const d = new Date(dateStr + 'T12:00:00')
-  if (freq === 'daily')    d.setDate(d.getDate() - 1)
-  if (freq === 'weekly')   d.setDate(d.getDate() - 7)
+  if (freq === 'daily') d.setDate(d.getDate() - 1)
+  if (freq === 'weekly') d.setDate(d.getDate() - 7)
   if (freq === 'biweekly') d.setDate(d.getDate() - 14)
   return d.toISOString().slice(0, 10)
 }
@@ -175,12 +180,12 @@ export function calcPaymentAmount(
   principal: number,
   annualRate: number,
   termMonths: number,
-  freq: LoanFrequency
+  freq: LoanFrequency,
 ): number {
   const r = annualRate / periodsPerYear(freq)
-  const n = Math.round(termMonths * periodsPerYear(freq) / 12)
+  const n = Math.round((termMonths * periodsPerYear(freq)) / 12)
   if (r === 0) return r2(principal / n)
-  return r2(principal * r / (1 - Math.pow(1 + r, -n)))
+  return r2((principal * r) / (1 - (1 + r) ** -n))
 }
 
 export function generateAmortizationSchedule(loan: Loan, disbursements?: LoanDisbursement[]): AmortizationRow[] {
@@ -200,25 +205,24 @@ function generateMcaSchedule(loan: Loan, draws: LoanDisbursement[] | null): Amor
   // With draws: use earliest draw date as accrualStart (advance received = accrual begins).
   // No draws: loan.start_date is first payment date; step back one period for accrualStart.
   const startDate = draws
-    ? draws.reduce((min, d) => d.disbursement_date < min ? d.disbursement_date : min, draws[0].disbursement_date)
+    ? draws.reduce((min, d) => (d.disbursement_date < min ? d.disbursement_date : min), draws[0].disbursement_date)
     : subPeriod(loan.start_date, loan.payment_frequency)
   const totalOwed = r2(basePrincipal * fr)
-  const principalRatio = 1 / fr  // fraction of each payment that is principal recovery
+  const principalRatio = 1 / fr // fraction of each payment that is principal recovery
 
   const ppy = periodsPerYear(loan.payment_frequency)
-  const totalPeriods = loan.term_months > 0
-    ? Math.round(loan.term_months * ppy / 12)
-    : Math.ceil(totalOwed / loan.payment_amount)
+  const totalPeriods =
+    loan.term_months > 0 ? Math.round((loan.term_months * ppy) / 12) : Math.ceil(totalOwed / loan.payment_amount)
 
   const rows: AmortizationRow[] = []
-  let remaining = totalOwed       // total still owed (principal + factor cost combined)
+  let remaining = totalOwed // total still owed (principal + factor cost combined)
   let principalBalance = basePrincipal
   let accrualStart = startDate
 
   for (let i = 1; i <= totalPeriods && remaining > 0.005; i++) {
     const payment = i === totalPeriods ? r2(remaining) : Math.min(loan.payment_amount, remaining)
     const principal = r2(payment * principalRatio)
-    const interest = r2(payment - principal)   // factor cost portion
+    const interest = r2(payment - principal) // factor cost portion
     remaining = r2(remaining - payment)
     principalBalance = r2(Math.max(0, principalBalance - principal))
     // No draws: start_date IS the contractual first payment date — pin it instead of
@@ -226,7 +230,16 @@ function generateMcaSchedule(loan: Loan, draws: LoanDisbursement[] | null): Amor
     const paymentDate = i === 1 && !draws ? loan.start_date : addPeriod(accrualStart, loan.payment_frequency)
     const accrualEnd = dayBefore(paymentDate)
 
-    rows.push({ period: i, accrualStart, accrualEnd, date: paymentDate, payment: r2(payment), principal, interest, balance: principalBalance })
+    rows.push({
+      period: i,
+      accrualStart,
+      accrualEnd,
+      date: paymentDate,
+      payment: r2(payment),
+      principal,
+      interest,
+      balance: principalBalance,
+    })
     accrualStart = paymentDate
   }
 
@@ -235,7 +248,7 @@ function generateMcaSchedule(loan: Loan, draws: LoanDisbursement[] | null): Amor
 
 function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null): AmortizationRow[] {
   const ppy = periodsPerYear(loan.payment_frequency)
-  const totalPeriods = Math.round(loan.term_months * ppy / 12)
+  const totalPeriods = Math.round((loan.term_months * ppy) / 12)
 
   // Flat fee note: fixed total finance charge spread evenly; principal balloon on last payment.
   if (usesFlatFee(loan.instrument_type) && loan.total_fee != null) {
@@ -253,7 +266,16 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
       const princ = isLast ? principal : 0
       const balance = isLast ? 0 : principal
       feeRemaining = r2(feeRemaining - fee)
-      rows.push({ period: i, accrualStart, accrualEnd, date: paymentDate, payment: r2(fee + princ), principal: princ, interest: fee, balance })
+      rows.push({
+        period: i,
+        accrualStart,
+        accrualEnd,
+        date: paymentDate,
+        payment: r2(fee + princ),
+        principal: princ,
+        interest: fee,
+        balance,
+      })
       accrualStart = paymentDate
     }
     return rows
@@ -262,15 +284,19 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
   const periodicRate = (loan.interest_rate ?? 0) / ppy
   // Balloon loans pay the agreed periodic amount — recomputing a fully-amortizing
   // payment would erase the balloon and misstate every principal/interest split
-  const paymentOverride = loan.loan_type === 'balloon' && loan.payment_amount > 0
-    ? loan.payment_amount : undefined
+  const paymentOverride = loan.loan_type === 'balloon' && loan.payment_amount > 0 ? loan.payment_amount : undefined
 
   // No draws: loan.start_date is first payment date; pass subPeriod so the schedule
   // preserves that date while computing accrualStart one period earlier.
   if (!draws) {
     return buildScheduleSegment(
-      loan.original_principal, subPeriod(loan.start_date, loan.payment_frequency), 1, totalPeriods,
-      periodicRate, loan.payment_frequency, loan.loan_type,
+      loan.original_principal,
+      subPeriod(loan.start_date, loan.payment_frequency),
+      1,
+      totalPeriods,
+      periodicRate,
+      loan.payment_frequency,
+      loan.loan_type,
       { firstPaymentDate: loan.start_date, paymentOverride },
     )
   }
@@ -285,18 +311,21 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
   let stubRow: AmortizationRow | null = null
   const earliestDraw = sortedDraws[0]
   if (earliestDraw.disbursement_date < loan.start_date) {
-    const drawnAtStub = r2(sortedDraws
-      .filter(d => d.disbursement_date <= earliestDraw.disbursement_date)
-      .reduce((s, d) => s + d.amount, 0))
+    const drawnAtStub = r2(
+      sortedDraws.filter(d => d.disbursement_date <= earliestDraw.disbursement_date).reduce((s, d) => s + d.amount, 0),
+    )
     const stubDays = days30360(earliestDraw.disbursement_date, loan.start_date)
-    const stubInterest = r2(drawnAtStub * (loan.interest_rate ?? 0) * stubDays / 360)
+    const stubInterest = r2((drawnAtStub * (loan.interest_rate ?? 0) * stubDays) / 360)
     stubRow = {
       period: 0,
       accrualStart: earliestDraw.disbursement_date,
       accrualEnd: dayBefore(loan.start_date),
       date: loan.start_date,
       payment: stubInterest,
-      principal: 0, interest: stubInterest, balance: drawnAtStub, isStub: true,
+      principal: 0,
+      interest: stubInterest,
+      balance: drawnAtStub,
+      isStub: true,
     }
   }
 
@@ -306,11 +335,13 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
   for (const draw of sortedDraws) {
     let splitIdx = -1
     for (let i = rows.length - 1; i >= 0; i--) {
-      if (rows[i].date <= draw.disbursement_date) { splitIdx = i; break }
+      if (rows[i].date <= draw.disbursement_date) {
+        splitIdx = i
+        break
+      }
     }
 
     const keptRows = rows.slice(0, splitIdx + 1)
-    const balanceAtDraw = splitIdx >= 0 ? keptRows[splitIdx].balance : 0
     const periodsUsed = keptRows.length
     const remainingPeriods = totalPeriods - periodsUsed
 
@@ -328,27 +359,31 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
     if (splitIdx >= 0) {
       newBalance = r2(keptRows[splitIdx].balance + draw.amount)
     } else if (draw.disbursement_date < loan.start_date) {
-      newBalance = r2(sortedDraws
-        .filter(d => d.disbursement_date < loan.start_date)
-        .reduce((s, d) => s + d.amount, 0))
+      newBalance = r2(sortedDraws.filter(d => d.disbursement_date < loan.start_date).reduce((s, d) => s + d.amount, 0))
     } else {
       newBalance = r2(draw.amount)
     }
-    const segmentStartDate = splitIdx >= 0
-      ? keptRows[splitIdx].date
-      : (draw.disbursement_date < loan.start_date
+    const segmentStartDate =
+      splitIdx >= 0
+        ? keptRows[splitIdx].date
+        : draw.disbursement_date < loan.start_date
           ? loan.start_date
-          : subPeriod(draw.disbursement_date, loan.payment_frequency))
+          : subPeriod(draw.disbursement_date, loan.payment_frequency)
 
     rows = [
       ...keptRows,
       ...buildScheduleSegment(
-        newBalance, segmentStartDate, periodsUsed + 1, totalPeriods,
-        periodicRate, loan.payment_frequency, loan.loan_type,
+        newBalance,
+        segmentStartDate,
+        periodsUsed + 1,
+        totalPeriods,
+        periodicRate,
+        loan.payment_frequency,
+        loan.loan_type,
         {
           // Draw on/after start_date: the draw date is itself the first payment date
-          firstPaymentDate: splitIdx < 0 && draw.disbursement_date >= loan.start_date
-            ? draw.disbursement_date : undefined,
+          firstPaymentDate:
+            splitIdx < 0 && draw.disbursement_date >= loan.start_date ? draw.disbursement_date : undefined,
           paymentOverride,
         },
       ),
@@ -361,9 +396,13 @@ function generateStandardSchedule(loan: Loan, draws: LoanDisbursement[] | null):
 // Builds amortization rows for a single segment. Payment is recalculated from the
 // balance and remaining periods unless opts.paymentOverride pins the agreed amount.
 function buildScheduleSegment(
-  balance: number, startDate: string,
-  startPeriod: number, endPeriod: number,
-  periodicRate: number, freq: LoanFrequency, loanType: LoanType,
+  balance: number,
+  startDate: string,
+  startPeriod: number,
+  endPeriod: number,
+  periodicRate: number,
+  freq: LoanFrequency,
+  loanType: LoanType,
   opts?: { firstPaymentDate?: string; paymentOverride?: number },
 ): AmortizationRow[] {
   const nPeriods = endPeriod - startPeriod + 1
@@ -371,11 +410,11 @@ function buildScheduleSegment(
   // Recalculate payment for this balance and remaining term
   let payment: number
   if (loanType === 'interest_only') {
-    payment = r2(balance * periodicRate)  // interest-only; principal balloon at end
+    payment = r2(balance * periodicRate) // interest-only; principal balloon at end
   } else if (opts?.paymentOverride) {
     payment = opts.paymentOverride
   } else if (periodicRate > 0) {
-    payment = r2(balance * periodicRate / (1 - Math.pow(1 + periodicRate, -nPeriods)))
+    payment = r2((balance * periodicRate) / (1 - (1 + periodicRate) ** -nPeriods))
   } else {
     payment = r2(balance / nPeriods)
   }
@@ -400,12 +439,20 @@ function buildScheduleSegment(
       principal = r2(Math.min(pmt - interest, bal))
     }
 
-    const paymentDate = i === startPeriod && opts?.firstPaymentDate
-      ? opts.firstPaymentDate
-      : addPeriod(accrualStart, freq)
+    const paymentDate =
+      i === startPeriod && opts?.firstPaymentDate ? opts.firstPaymentDate : addPeriod(accrualStart, freq)
     const accrualEnd = dayBefore(paymentDate)
     bal = r2(Math.max(0, bal - principal))
-    rows.push({ period: i, accrualStart, accrualEnd, date: paymentDate, payment: pmt, principal, interest, balance: bal })
+    rows.push({
+      period: i,
+      accrualStart,
+      accrualEnd,
+      date: paymentDate,
+      payment: pmt,
+      principal,
+      interest,
+      balance: bal,
+    })
     accrualStart = paymentDate
   }
 

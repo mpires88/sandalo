@@ -4,11 +4,28 @@ import { usePathname } from 'next/navigation'
 import { usePermissions } from '@/lib/usePermissions'
 import { routeResource } from '@/lib/permissions'
 
-const D = { sage: '#2C5F52', gold: '#C8A96E', charcoal: '#4A4A3F', page: '#F5F0E8', border: '#D9D4C8', muted: 'rgba(74,74,63,0.5)' }
+const D = {
+  sage: '#2C5F52',
+  gold: '#C8A96E',
+  charcoal: '#4A4A3F',
+  page: '#F5F0E8',
+  border: '#D9D4C8',
+  muted: 'rgba(74,74,63,0.5)',
+}
 
 function CenterScreen({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', background: D.page, gap: 14 }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        minHeight: '100vh',
+        background: D.page,
+        gap: 14,
+      }}
+    >
       {children}
     </div>
   )
@@ -25,7 +42,16 @@ export default function AccessGuard({ children }: { children: React.ReactNode })
   if (loading) {
     return (
       <CenterScreen>
-        <div style={{ width: 26, height: 26, border: `2px solid ${D.border}`, borderTopColor: D.sage, borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+        <div
+          style={{
+            width: 26,
+            height: 26,
+            border: `2px solid ${D.border}`,
+            borderTopColor: D.sage,
+            borderRadius: '50%',
+            animation: 'spin .7s linear infinite',
+          }}
+        />
       </CenterScreen>
     )
   }
@@ -37,9 +63,29 @@ export default function AccessGuard({ children }: { children: React.ReactNode })
   if (resource && !can(resource, 'read')) {
     return (
       <CenterScreen>
-        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 48, height: 48, borderRadius: '50%', background: 'rgba(185,64,64,0.1)' }}>
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#B94040" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 48,
+            height: 48,
+            borderRadius: '50%',
+            background: 'rgba(185,64,64,0.1)',
+          }}
+        >
+          <svg
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#B94040"
+            strokeWidth={1.75}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <rect x="3" y="11" width="18" height="11" rx="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
           </svg>
         </div>
         <div style={{ fontSize: 16, fontWeight: 700, color: D.charcoal }}>No access to this section</div>

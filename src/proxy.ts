@@ -14,19 +14,21 @@ export async function proxy(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() { return request.cookies.getAll() },
+        getAll() {
+          return request.cookies.getAll()
+        },
         setAll(cookiesToSet) {
           cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value))
           response = NextResponse.next({ request })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            response.cookies.set(name, value, options)
-          )
+          cookiesToSet.forEach(({ name, value, options }) => response.cookies.set(name, value, options))
         },
       },
-    }
+    },
   )
 
-  const { data: { user } } = await supabase.auth.getUser()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
   const pathname = request.nextUrl.pathname
 
   // Allow public assets and API routes through (API routes self-enforce auth).
@@ -41,8 +43,7 @@ export async function proxy(request: NextRequest) {
 
   // Deactivated users: sign out and bounce to login even if their JWT is still valid.
   if (user) {
-    const { data: profile } = await supabase
-      .from('profiles').select('is_active').eq('id', user.id).single()
+    const { data: profile } = await supabase.from('profiles').select('is_active').eq('id', user.id).single()
     if (profile && !profile.is_active) {
       await supabase.auth.signOut()
       const redirect = NextResponse.redirect(new URL('/login?inactive=1', request.url))

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, CSSProperties } from 'react'
+import { useState, useEffect, useRef, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
 interface CategoryGroup {
@@ -18,7 +18,12 @@ interface Props {
   onCreate?: (name: string) => void
 }
 
-interface DropPos { top: number; bottom: number; left: number; width: number }
+interface DropPos {
+  top: number
+  bottom: number
+  left: number
+  width: number
+}
 
 export default function CategoryInput({
   value,
@@ -29,20 +34,28 @@ export default function CategoryInput({
   style = {},
   onCreate,
 }: Props) {
-  const [open,    setOpen]    = useState(false)
-  const [openUp,  setOpenUp]  = useState(false)
+  const [open, setOpen] = useState(false)
+  const [openUp, setOpenUp] = useState(false)
   const [dropPos, setDropPos] = useState<DropPos | null>(null)
-  const [query,   setQuery]   = useState(value ?? '')
+  const [query, setQuery] = useState(value ?? '')
   const [mounted, setMounted] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { setMounted(true) }, [])
-  useEffect(() => { setQuery(value ?? '') }, [value])
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+  useEffect(() => {
+    setQuery(value ?? '')
+  }, [value])
 
   const displayItems = buildDisplayItems(groups, categories, query)
   const hasItems = displayItems.some(x => x.type === 'account')
 
-  const select = (cat: string) => { setQuery(cat); onChange(cat); setOpen(false) }
+  const select = (cat: string) => {
+    setQuery(cat)
+    onChange(cat)
+    setOpen(false)
+  }
 
   const openDropdown = () => {
     if (wrapRef.current) {
@@ -50,10 +63,10 @@ export default function CategoryInput({
       const spaceBelow = window.innerHeight - r.bottom
       setOpenUp(spaceBelow < 280)
       setDropPos({
-        top:    r.bottom + 2,
+        top: r.bottom + 2,
         bottom: window.innerHeight - r.top + 2,
-        left:   r.left,
-        width:  r.width,
+        left: r.left,
+        width: r.width,
       })
     }
     setOpen(true)
@@ -66,7 +79,10 @@ export default function CategoryInput({
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Escape') { setOpen(false); return }
+    if (e.key === 'Escape') {
+      setOpen(false)
+      return
+    }
     if (e.key === 'Enter') {
       const first = displayItems.find(x => x.type === 'account')
       if (first) select(first.name!)
@@ -82,51 +98,59 @@ export default function CategoryInput({
   }, [])
 
   // Render dropdown as a portal so overflow:hidden parents never clip it
-  const portal = mounted && open && dropPos && (hasItems || !!onCreate)
-    ? createPortal(
-        <div style={{
-          position: 'fixed',
-          top:    openUp ? 'auto' : dropPos.top,
-          bottom: openUp ? dropPos.bottom : 'auto',
-          left:   dropPos.left,
-          width:  dropPos.width,
-          background: '#fff',
-          border: '1px solid #d1d5db',
-          borderRadius: 6,
-          boxShadow: '0 4px 16px rgba(0,0,0,.15)',
-          zIndex: 9999,
-          maxHeight: 260,
-          overflowY: 'auto',
-        }}>
-          {displayItems.map((item, i) =>
-            item.type === 'header' ? (
-              <div key={`h-${i}`} style={headerSt}>{item.section}</div>
-            ) : (
+  const portal =
+    mounted && open && dropPos && (hasItems || !!onCreate)
+      ? createPortal(
+          <div
+            style={{
+              position: 'fixed',
+              top: openUp ? 'auto' : dropPos.top,
+              bottom: openUp ? dropPos.bottom : 'auto',
+              left: dropPos.left,
+              width: dropPos.width,
+              background: '#fff',
+              border: '1px solid #d1d5db',
+              borderRadius: 6,
+              boxShadow: '0 4px 16px rgba(0,0,0,.15)',
+              zIndex: 9999,
+              maxHeight: 260,
+              overflowY: 'auto',
+            }}
+          >
+            {displayItems.map((item, i) =>
+              item.type === 'header' ? (
+                <div key={`h-${i}`} style={headerSt}>
+                  {item.section}
+                </div>
+              ) : (
+                <div
+                  key={item.name}
+                  style={acctSt}
+                  onMouseDown={() => select(item.name!)}
+                  onMouseEnter={e => (e.currentTarget.style.background = '#f3f4f6')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  {groups ? <span style={{ paddingLeft: 8 }}>{item.name}</span> : item.name}
+                </div>
+              ),
+            )}
+            {onCreate && (
               <div
-                key={item.name}
-                style={acctSt}
-                onMouseDown={() => select(item.name!)}
-                onMouseEnter={e => (e.currentTarget.style.background = '#f3f4f6')}
+                style={createBtnSt}
+                onMouseDown={() => {
+                  onCreate(query)
+                  setOpen(false)
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = '#f0fdf4')}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
               >
-                {groups ? <span style={{ paddingLeft: 8 }}>{item.name}</span> : item.name}
+                + Create new account{query.trim() ? `: "${query.trim()}"` : ''}
               </div>
-            )
-          )}
-          {onCreate && (
-            <div
-              style={createBtnSt}
-              onMouseDown={() => { onCreate(query); setOpen(false) }}
-              onMouseEnter={e => (e.currentTarget.style.background = '#f0fdf4')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              + Create new account{query.trim() ? `: "${query.trim()}"` : ''}
-            </div>
-          )}
-        </div>,
-        document.body,
-      )
-    : null
+            )}
+          </div>,
+          document.body,
+        )
+      : null
 
   return (
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', ...style }}>
@@ -148,11 +172,7 @@ type DisplayItem =
   | { type: 'header'; section: string; name?: undefined }
   | { type: 'account'; name: string; section?: undefined }
 
-function buildDisplayItems(
-  groups: CategoryGroup[] | null,
-  categories: string[],
-  query: string,
-): DisplayItem[] {
+function buildDisplayItems(groups: CategoryGroup[] | null, categories: string[], query: string): DisplayItem[] {
   const q = query.trim().toLowerCase()
   if (groups) {
     const items: DisplayItem[] = []
@@ -169,21 +189,44 @@ function buildDisplayItems(
 }
 
 const inpSt: CSSProperties = {
-  width: '100%', padding: '6px 10px', border: '1px solid #d1d5db',
-  borderRadius: 6, fontSize: 13, color: '#111827', background: '#fff',
-  outline: 'none', boxSizing: 'border-box',
+  width: '100%',
+  padding: '6px 10px',
+  border: '1px solid #d1d5db',
+  borderRadius: 6,
+  fontSize: 13,
+  color: '#111827',
+  background: '#fff',
+  outline: 'none',
+  boxSizing: 'border-box',
 }
 const headerSt: CSSProperties = {
-  padding: '5px 10px 3px', fontSize: 10, fontWeight: 700, color: '#9ca3af',
-  textTransform: 'uppercase', letterSpacing: '.05em', background: '#f9fafb',
-  borderBottom: '1px solid #f3f4f6', userSelect: 'none', position: 'sticky', top: 0,
+  padding: '5px 10px 3px',
+  fontSize: 10,
+  fontWeight: 700,
+  color: '#9ca3af',
+  textTransform: 'uppercase',
+  letterSpacing: '.05em',
+  background: '#f9fafb',
+  borderBottom: '1px solid #f3f4f6',
+  userSelect: 'none',
+  position: 'sticky',
+  top: 0,
 }
 const acctSt: CSSProperties = {
-  padding: '7px 10px', fontSize: 13, color: '#111827',
-  cursor: 'pointer', background: 'transparent', userSelect: 'none',
+  padding: '7px 10px',
+  fontSize: 13,
+  color: '#111827',
+  cursor: 'pointer',
+  background: 'transparent',
+  userSelect: 'none',
 }
 const createBtnSt: CSSProperties = {
-  padding: '7px 10px', fontSize: 12, fontWeight: 500, color: '#2C5F52',
-  cursor: 'pointer', background: 'transparent', userSelect: 'none',
+  padding: '7px 10px',
+  fontSize: 12,
+  fontWeight: 500,
+  color: '#2C5F52',
+  cursor: 'pointer',
+  background: 'transparent',
+  userSelect: 'none',
   borderTop: '1px solid #f3f4f6',
 }

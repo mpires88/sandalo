@@ -8,22 +8,21 @@ const ROLE_RANK: Record<Role, number> = { user: 1, admin: 2, super_admin: 3 }
 const ASSIGNABLE_ROLES: Role[] = ['super_admin', 'admin', 'user']
 
 function adminClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } }
-  )
+  return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
 }
 
 // Returns the caller (id + role) only if they are a signed-in, ACTIVE admin.
 // A banned/deactivated admin whose JWT is still valid is rejected here.
 async function requireAdmin(): Promise<{ id: string; role: Role } | null> {
   const supabase = await createSupabaseServerClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
   if (!user) return null
-  const { data: profile } = await supabase
-    .from('profiles').select('role, is_active').eq('id', user.id).single()
-  if (!profile || !profile.is_active) return null
+  const { data: profile } = await supabase.from('profiles').select('role, is_active').eq('id', user.id).single()
+  if (!profile?.is_active) return null
   if (!['super_admin', 'admin'].includes(profile.role)) return null
   return { id: user.id, role: profile.role as Role }
 }
@@ -34,10 +33,13 @@ export async function POST(request: Request) {
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { email, name, role, password, staff_id } = await request.json()
-  if (!email || !name || !password) return NextResponse.json({ error: 'email, name, and password are required' }, { status: 400 })
+  if (!email || !name || !password)
+    return NextResponse.json({ error: 'email, name, and password are required' }, { status: 400 })
   if (!ASSIGNABLE_ROLES.includes(role)) return NextResponse.json({ error: 'Invalid role' }, { status: 400 })
-  if (typeof password !== 'string' || password.length < 8) return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 })
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return NextResponse.json({ error: 'Invalid email address' }, { status: 400 })
+  if (typeof password !== 'string' || password.length < 8)
+    return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 })
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
+    return NextResponse.json({ error: 'Invalid email address' }, { status: 400 })
 
   // A caller can only create a user whose role ranks strictly below their own
   // (an admin cannot mint another admin or a super_admin).
@@ -49,13 +51,19 @@ export async function POST(request: Request) {
 
   // Create auth user
   const { data: authData, error: authErr } = await admin.auth.admin.createUser({
-    email, password, email_confirm: true,
+    email,
+    password,
+    email_confirm: true,
   })
   if (authErr) return NextResponse.json({ error: authErr.message }, { status: 400 })
 
   // Insert profile
   const { error: profileErr } = await admin.from('profiles').insert({
-    id: authData.user.id, client_id: CLIENT_ID, name, email, role,
+    id: authData.user.id,
+    client_id: CLIENT_ID,
+    name,
+    email,
+    role,
     staff_id: staff_id ?? null,
   })
   if (profileErr) {
@@ -77,8 +85,7 @@ export async function PATCH(request: Request) {
   const admin = adminClient()
 
   // Load the target so we can enforce the role hierarchy against its CURRENT role.
-  const { data: target } = await admin
-    .from('profiles').select('role').eq('id', id).single()
+  const { data: target } = await admin.from('profiles').select('role').eq('id', id).single()
   if (!target) return NextResponse.json({ error: 'User not found' }, { status: 404 })
   const targetRole = target.role as Role
 
@@ -103,10 +110,11 @@ export async function PATCH(request: Request) {
   }
 
   if (is_active !== undefined) {
-    if (editingSelf && is_active === false) return NextResponse.json({ error: 'You cannot deactivate your own account.' }, { status: 403 })
+    if (editingSelf && is_active === false)
+      return NextResponse.json({ error: 'You cannot deactivate your own account.' }, { status: 403 })
     updates.is_active = is_active
   }
-  if (name     !== undefined) updates.name     = name
+  if (name !== undefined) updates.name = name
   if (staff_id !== undefined) updates.staff_id = staff_id ?? null
 
   if (Object.keys(updates).length === 0) return NextResponse.json({ ok: true })
