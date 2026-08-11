@@ -132,7 +132,8 @@ export default function PaymentMethods() {
   }
 
   async function toggleActive(m: PaymentMethod) {
-    await supabase.from('payment_methods').update({ is_active: !m.is_active }).eq('id', m.id)
+    const { error } = await supabase.from('payment_methods').update({ is_active: !m.is_active }).eq('id', m.id)
+    if (error) alert(`Update failed: ${error.message}`)
     await load()
   }
 

@@ -125,7 +125,8 @@ export default function ServiceCategories() {
   }
 
   async function toggleActive(c: Category) {
-    await supabase.from('service_categories').update({ is_active: !c.is_active }).eq('id', c.id)
+    const { error } = await supabase.from('service_categories').update({ is_active: !c.is_active }).eq('id', c.id)
+    if (error) alert(`Update failed: ${error.message}`)
     await load()
   }
 

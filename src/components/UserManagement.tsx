@@ -147,9 +147,15 @@ export default function UserManagement() {
     }
     // Assign groups
     if (fGroups.size > 0) {
-      await supabase
+      const { error: grpErr } = await supabase
         .from('user_group_members')
         .insert([...fGroups].map(g => ({ client_id: CLIENT_ID, user_id: json.id, group_id: g })))
+      if (grpErr) {
+        setErr(`User created, but group assignment failed: ${grpErr.message}`)
+        setSaving(false)
+        load()
+        return
+      }
     }
     setSaving(false)
     setModal(null)
@@ -178,12 +184,28 @@ export default function UserManagement() {
       setSaving(false)
       return
     }
-    // Sync group memberships
-    await supabase.from('user_group_members').delete().eq('user_id', editing.id).eq('client_id', CLIENT_ID)
+    // Sync group memberships — a failed re-insert after the delete silently
+    // drops the user out of every group, so both steps must surface errors
+    const { error: memDelErr } = await supabase
+      .from('user_group_members')
+      .delete()
+      .eq('user_id', editing.id)
+      .eq('client_id', CLIENT_ID)
+    if (memDelErr) {
+      setErr(`Groups not updated: ${memDelErr.message}`)
+      setSaving(false)
+      return
+    }
     if (fGroups.size > 0) {
-      await supabase
+      const { error: memInsErr } = await supabase
         .from('user_group_members')
         .insert([...fGroups].map(g => ({ client_id: CLIENT_ID, user_id: editing.id, group_id: g })))
+      if (memInsErr) {
+        setErr(`Group memberships were cleared but not re-saved — save again: ${memInsErr.message}`)
+        setSaving(false)
+        load()
+        return
+      }
     }
     setSaving(false)
     setModal(null)
@@ -191,17 +213,25 @@ export default function UserManagement() {
   }
 
   async function toggleActive(p: Profile) {
-    await fetch('/api/admin/users', {
+    const res = await fetch('/api/admin/users', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: p.id, is_active: !p.is_active }),
     })
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      alert(j.error ?? `Could not ${p.is_active ? 'deactivate' : 'activate'} ${p.name}`)
+    }
     load()
   }
 
   async function deleteUser(p: Profile) {
     if (!confirm(`Delete ${p.name}? This cannot be undone.`)) return
-    await fetch(`/api/admin/users?id=${p.id}`, { method: 'DELETE' })
+    const res = await fetch(`/api/admin/users?id=${p.id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      alert(j.error ?? `Could not delete ${p.name}`)
+    }
     load()
   }
 

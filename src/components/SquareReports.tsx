@@ -260,7 +260,11 @@ export default function SquareReports({ clientId }: { clientId: string }) {
 
   const deleteReport = async (id: string) => {
     if (!confirm('Delete this report?')) return
-    await supabase.from('square_reports').delete().eq('id', id)
+    const { error } = await supabase.from('square_reports').delete().eq('id', id)
+    if (error) {
+      alert(`Delete failed: ${error.message}`)
+      return
+    }
     load()
   }
 

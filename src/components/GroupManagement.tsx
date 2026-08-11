@@ -150,8 +150,14 @@ export default function GroupManagement() {
       groupId = data.id
     }
 
-    // Sync permissions
-    await supabase.from('group_permissions').delete().eq('group_id', groupId)
+    // Sync permissions — these rows ARE the group's access; a failure here must
+    // never be silent or every member's permissions quietly change
+    const { error: permDelErr } = await supabase.from('group_permissions').delete().eq('group_id', groupId)
+    if (permDelErr) {
+      setErr(`Permissions not saved: ${permDelErr.message}`)
+      setSaving(false)
+      return
+    }
     const permRows = RESOURCES.map(r => ({
       client_id: CLIENT_ID,
       group_id: groupId,
@@ -159,7 +165,13 @@ export default function GroupManagement() {
       can_read: fPerms[r.key]?.can_read ?? true,
       can_write: fPerms[r.key]?.can_write ?? false,
     }))
-    await supabase.from('group_permissions').insert(permRows)
+    const { error: permInsErr } = await supabase.from('group_permissions').insert(permRows)
+    if (permInsErr) {
+      setErr(`Permissions were cleared but not re-saved — save again: ${permInsErr.message}`)
+      setSaving(false)
+      load()
+      return
+    }
 
     setSaving(false)
     setModal(false)
@@ -168,7 +180,11 @@ export default function GroupManagement() {
 
   async function del(g: Group) {
     if (!confirm(`Delete "${g.name}"?`)) return
-    await supabase.from('user_groups').delete().eq('id', g.id)
+    const { error } = await supabase.from('user_groups').delete().eq('id', g.id)
+    if (error) {
+      alert(`Delete failed: ${error.message}`)
+      return
+    }
     load()
   }
 

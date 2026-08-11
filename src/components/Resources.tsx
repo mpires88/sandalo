@@ -143,7 +143,8 @@ export default function Resources() {
   }
 
   async function toggleActive(r: Resource) {
-    await supabase.from('resources').update({ is_active: !r.is_active }).eq('id', r.id)
+    const { error } = await supabase.from('resources').update({ is_active: !r.is_active }).eq('id', r.id)
+    if (error) alert(`Update failed: ${error.message}`)
     await load()
   }
 

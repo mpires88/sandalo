@@ -234,7 +234,8 @@ export default function Services() {
   }
 
   async function toggleActive(s: Service) {
-    await supabase.from('services').update({ is_active: !s.is_active }).eq('id', s.id)
+    const { error } = await supabase.from('services').update({ is_active: !s.is_active }).eq('id', s.id)
+    if (error) alert(`Update failed: ${error.message}`)
     await load()
   }
 

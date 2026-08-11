@@ -136,6 +136,19 @@ export async function seedTransactionsOnce(clientId: string): Promise<void> {
   if (typeof window === 'undefined') return
   if (localStorage.getItem(SEED_KEY)) return
 
+  // localStorage is per-browser — check the DB too. Without this, a second
+  // device re-inserts the whole seed (the old dedup index used to mask this).
+  const { data: existing, error: checkErr } = await supabase
+    .from('bank_transactions')
+    .select('id')
+    .eq('client_id', clientId)
+    .limit(1)
+  if (checkErr) throw new Error(`Seed check failed: ${checkErr.message}`)
+  if ((existing ?? []).length > 0) {
+    localStorage.setItem(SEED_KEY, '1')
+    return
+  }
+
   const res = await fetch('/seeds/transactions.json')
   if (!res.ok) throw new Error(`Failed to load seed data: ${res.status}`)
   const rows: SeedRow[] = await res.json()
@@ -150,9 +163,11 @@ export async function seedTransactionsOnce(clientId: string): Promise<void> {
     reference_id: r.ref || null,
   }))
 
-  // Insert in batches of 500
+  // Insert in batches of 500 — throw on failure so the caller surfaces it and
+  // SEED_KEY stays unset, letting a partial seed retry instead of freezing forever
   for (let i = 0; i < records.length; i += 500) {
-    await supabase.from('bank_transactions').insert(records.slice(i, i + 500))
+    const { error } = await supabase.from('bank_transactions').insert(records.slice(i, i + 500))
+    if (error) throw new Error(`Seeding failed at batch ${i / 500 + 1}: ${error.message}`)
   }
 
   localStorage.setItem(SEED_KEY, '1')

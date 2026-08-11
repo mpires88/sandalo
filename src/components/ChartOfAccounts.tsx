@@ -207,7 +207,9 @@ export default function ChartOfAccounts({ clientId }: { clientId: string }) {
       return
     }
     if (name !== oldName) {
-      await supabase.from('categories').update({ parent: name }).eq('parent', oldName)
+      // Children reference the parent by name — a failed cascade orphans them
+      const { error: cascadeErr } = await supabase.from('categories').update({ parent: name }).eq('parent', oldName)
+      if (cascadeErr) alert(`Renamed, but sub-accounts could not follow: ${cascadeErr.message}`)
     }
     setEditKey(null)
     await load()
@@ -233,18 +235,33 @@ export default function ChartOfAccounts({ clientId }: { clientId: string }) {
       }),
     )
 
-    await supabase
+    const { error: secErr } = await supabase
       .from('categories')
       .update({ pl_section: section, ...(detachFromParent ? { parent: null } : {}) })
       .eq('name', name)
+    if (secErr) {
+      // Optimistic update already rendered — reload so the UI shows true state
+      alert(`Section change failed: ${secErr.message}`)
+      await load()
+      return
+    }
     for (const d of descendants) {
-      await supabase.from('categories').update({ pl_section: section }).eq('name', d.name)
+      const { error: dErr } = await supabase.from('categories').update({ pl_section: section }).eq('name', d.name)
+      if (dErr) {
+        alert(`Sub-account "${d.name}" could not move: ${dErr.message}`)
+        await load()
+        return
+      }
     }
   }
 
   const changeParent = async (name: string, parentName: string | null) => {
     setAccounts(prev => prev.map(a => (a.name === name ? { ...a, parent: parentName ?? null } : a)))
-    await supabase.from('categories').update({ parent: parentName }).eq('name', name)
+    const { error } = await supabase.from('categories').update({ parent: parentName }).eq('name', name)
+    if (error) {
+      alert(`Change failed: ${error.message}`)
+      await load()
+    }
   }
 
   const deleteAccount = async (name: string) => {
@@ -260,18 +277,27 @@ export default function ChartOfAccounts({ clientId }: { clientId: string }) {
     }
     // Promote direct children to their grandparent (or top-level)
     const grandparent = accounts.find(a => a.name === name)?.parent ?? null
-    await supabase.from('categories').update({ parent: grandparent }).eq('parent', name).eq('client_id', clientId)
+    const { error: promoteErr } = await supabase
+      .from('categories')
+      .update({ parent: grandparent })
+      .eq('parent', name)
+      .eq('client_id', clientId)
+    if (promoteErr) alert(`Deleted, but sub-accounts could not be re-parented: ${promoteErr.message}`)
     await load()
     setSaving(false)
   }
 
   const changeFAParent = async (fa: FinancialAccount, parentName: string | null) => {
     setFinAccounts(prev => prev.map(a => (a.id === fa.id ? { ...a, parent_category: parentName } : a)))
-    await supabase
+    const { error } = await supabase
       .from('financial_accounts')
       .update({ parent_category: parentName })
       .eq('id', fa.id)
       .eq('client_id', clientId)
+    if (error) {
+      alert(`Change failed: ${error.message}`)
+      await load()
+    }
   }
 
   if (loading)

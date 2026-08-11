@@ -14,8 +14,9 @@ create table if not exists bank_transactions (
   created_at       timestamptz not null default now()
 );
 
-create unique index if not exists bank_transactions_dedup
-  on bank_transactions (client_id, transaction_date, description, amount);
+-- No row-level dedup index: two genuinely identical transactions (same date,
+-- description, amount) are both real charges. Import ids number repeated rows
+-- deterministically instead (see 20260811000000_allow_identical_transactions.sql).
 
 -- ─── categories (chart of accounts) ──────────────────────────────────────────
 create table if not exists categories (

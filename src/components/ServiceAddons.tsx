@@ -189,11 +189,23 @@ export default function ServiceAddons() {
       addonId = data.id
     }
 
-    // Sync category links: delete all then re-insert selected
-    await supabase.from('service_addon_categories').delete().eq('addon_id', addonId)
+    // Sync category links: delete all then re-insert selected — a silent failure
+    // here changes which services offer the add-on
+    const { error: linkDelErr } = await supabase.from('service_addon_categories').delete().eq('addon_id', addonId)
+    if (linkDelErr) {
+      setErr(`Saved, but category links failed: ${linkDelErr.message}`)
+      setSaving(false)
+      return
+    }
     if (form.categoryIds.size > 0) {
       const links = [...form.categoryIds].map(cid => ({ addon_id: addonId, category_id: cid }))
-      await supabase.from('service_addon_categories').insert(links)
+      const { error: linkInsErr } = await supabase.from('service_addon_categories').insert(links)
+      if (linkInsErr) {
+        setErr(`Saved, but category links failed — save again: ${linkInsErr.message}`)
+        setSaving(false)
+        load()
+        return
+      }
     }
 
     setSaving(false)
@@ -202,7 +214,11 @@ export default function ServiceAddons() {
   }
 
   async function toggleActive(a: Addon) {
-    await supabase.from('service_addons').update({ is_active: !a.is_active }).eq('id', a.id)
+    const { error } = await supabase.from('service_addons').update({ is_active: !a.is_active }).eq('id', a.id)
+    if (error) {
+      alert(`Update failed: ${error.message}`)
+      return
+    }
     setAddons(prev => prev.map(x => (x.id === a.id ? { ...x, is_active: !x.is_active } : x)))
   }
 

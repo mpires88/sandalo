@@ -53,6 +53,7 @@ export default function FinancialReports() {
   const [accounts, setAccounts] = useState<MergedAccount[]>([])
   const [allMonths, setAllMonths] = useState<string[]>([]) // sorted unique YYYY-MM keys
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [finAccounts, setFinAccounts] = useState<FinancialAccount[]>([])
   const [acctMonthly, setAcctMonthly] = useState<Record<string, Record<string, number>>>({})
 
@@ -105,11 +106,17 @@ export default function FinancialReports() {
           .eq('client_id', CLIENT_ID)
           .order('id')
           .range(offset, offset + 999)
+        if (res.error) {
+          // A failed page must not render as complete-but-smaller reports
+          setLoadError(res.error.message)
+          return
+        }
         const batch = (res.data ?? []) as TxnRow[]
         allRows = [...allRows, ...batch]
         if (batch.length < 1000) break
         offset += 1000
       }
+      setLoadError(null)
 
       // Aggregate by month for finest granularity; roll up to year/all-time on demand
       const monthly: Record<string, Record<string, number>> = {}
@@ -660,6 +667,8 @@ export default function FinancialReports() {
   // ─── Render ──────────────────────────────────────────────────────────────────
 
   if (loading) return <div style={{ padding: 40, color: D.muted, fontSize: 14 }}>Loading financial data…</div>
+  if (loadError)
+    return <div style={{ padding: 40, color: D.red, fontSize: 14 }}>Failed to load financial data: {loadError}</div>
 
   return (
     <div style={{ padding: '24px 32px', background: D.page, minHeight: '100vh' }}>

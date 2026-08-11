@@ -205,6 +205,14 @@ export default function Dashboard({ clientId }: { clientId: string }) {
           .or('account.not.is.null,splits.not.is.null')
           .order('id')
           .range(offset, offset + 999)
+        if (res.error) {
+          // A failed page must not render as complete-but-smaller financials
+          if (!cancelled) {
+            setError(res.error.message)
+            setLoading(false)
+          }
+          return
+        }
         const batch = (res.data ?? []) as TxnRow[]
         allRows = [...allRows, ...batch]
         if (batch.length < 1000) break

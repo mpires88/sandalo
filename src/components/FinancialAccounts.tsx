@@ -182,7 +182,11 @@ export default function FinancialAccounts() {
         ? `This account has ${count} linked transaction${count > 1 ? 's' : ''}. Deleting it will unlink them. Continue?`
         : 'Delete this account?'
     if (!confirm(msg)) return
-    await supabase.from('financial_accounts').delete().eq('id', id).eq('client_id', CLIENT_ID)
+    const { error } = await supabase.from('financial_accounts').delete().eq('id', id).eq('client_id', CLIENT_ID)
+    if (error) {
+      alert(`Delete failed: ${error.message}`)
+      return
+    }
     await load()
   }
 
@@ -196,7 +200,7 @@ export default function FinancialAccounts() {
     if (swapIdx < 0 || swapIdx >= sectionAccts.length) return
     const a = sectionAccts[idx]
     const b = sectionAccts[swapIdx]
-    await Promise.all([
+    const results = await Promise.all([
       supabase
         .from('financial_accounts')
         .update({ sort_order: b.sort_order })
@@ -208,6 +212,8 @@ export default function FinancialAccounts() {
         .eq('id', b.id)
         .eq('client_id', CLIENT_ID),
     ])
+    const moveErr = results.find(r => r.error)?.error
+    if (moveErr) alert(`Reorder failed: ${moveErr.message}`)
     await load()
   }
 

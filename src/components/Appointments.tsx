@@ -826,7 +826,11 @@ export default function Appointments() {
           setFormErr(err.message)
           return
         }
-        await syncApptAddons(form.id, form.addonIds)
+        const syncErr = await syncApptAddons(form.id, form.addonIds)
+        if (syncErr) {
+          setFormErr(t(`Saved, but add-ons failed: ${syncErr}`, `Guardado, pero los complementos fallaron: ${syncErr}`))
+          return
+        }
       } else if (isMulti) {
         // Insert all linked records together
         const records = [
@@ -853,7 +857,15 @@ export default function Appointments() {
           return
         }
         // Attach add-ons to the primary (first) record only
-        if (inserted?.[0]?.id) await syncApptAddons(inserted[0].id, form.addonIds)
+        if (inserted?.[0]?.id) {
+          const syncErr = await syncApptAddons(inserted[0].id, form.addonIds)
+          if (syncErr) {
+            setFormErr(
+              t(`Booked, but add-ons failed: ${syncErr}`, `Reservado, pero los complementos fallaron: ${syncErr}`),
+            )
+            return
+          }
+        }
       } else {
         const { data: inserted, error: err } = await supabase
           .from('appointments')
@@ -864,7 +876,15 @@ export default function Appointments() {
           setFormErr(err.message)
           return
         }
-        if (inserted?.id) await syncApptAddons(inserted.id, form.addonIds)
+        if (inserted?.id) {
+          const syncErr = await syncApptAddons(inserted.id, form.addonIds)
+          if (syncErr) {
+            setFormErr(
+              t(`Booked, but add-ons failed: ${syncErr}`, `Reservado, pero los complementos fallaron: ${syncErr}`),
+            )
+            return
+          }
+        }
       }
 
       setModal(false)
@@ -874,9 +894,12 @@ export default function Appointments() {
       setSaving(false)
     }
   }
-  // Replace the add-on rows for an appointment with the given selection
-  async function syncApptAddons(apptId: string, addonIds: string[]) {
-    await supabase.from('appointment_addons').delete().eq('appointment_id', apptId)
+  // Replace the add-on rows for an appointment with the given selection.
+  // Returns an error message, or null on success — a failure after the delete
+  // has wiped the stored add-ons, so callers must surface it, not swallow it.
+  async function syncApptAddons(apptId: string, addonIds: string[]): Promise<string | null> {
+    const { error: delErr } = await supabase.from('appointment_addons').delete().eq('appointment_id', apptId)
+    if (delErr) return delErr.message
     if (addonIds.length) {
       const rows = addonIds.map(id => ({
         client_id: CLIENT_ID,
@@ -884,8 +907,10 @@ export default function Appointments() {
         addon_id: id,
         price_charged: addons.find(a => a.id === id)?.price ?? 0,
       }))
-      await supabase.from('appointment_addons').insert(rows)
+      const { error: insErr } = await supabase.from('appointment_addons').insert(rows)
+      if (insErr) return insErr.message
     }
+    return null
   }
 
   // Load the add-ons attached to an appointment (full ServiceAddon objects)
@@ -897,10 +922,14 @@ export default function Appointments() {
 
   // Phase 1 — Check In: mark the guest as arrived, then show their visit details
   async function checkIn(a: Appt) {
-    await supabase
+    const { error } = await supabase
       .from('appointments')
       .update({ status: 'checked_in', checked_in_at: new Date().toISOString() })
       .eq('id', a.id)
+    if (error) {
+      alert(t(`Check-in failed: ${error.message}`, `Error al registrar: ${error.message}`))
+      return
+    }
     await (view === 'day' ? loadDay() : load())
     const addonList = await loadApptAddons(a.id)
     setVisitAddons(addonList)
@@ -941,7 +970,7 @@ export default function Appointments() {
     try {
       const subtotal = Math.round(billLines.reduce((s, l) => s + l.amount, 0) * 100) / 100
       const tip = Math.round((parseFloat(billTip) || 0) * 100) / 100
-      await supabase
+      const { error } = await supabase
         .from('appointments')
         .update({
           status: 'completed',
@@ -952,6 +981,11 @@ export default function Appointments() {
           checked_out_at: new Date().toISOString(),
         })
         .eq('id', billAppt.id)
+      if (error) {
+        // Money write — never close the bill as if it were paid
+        alert(t(`Payment could not be saved: ${error.message}`, `No se pudo guardar el pago: ${error.message}`))
+        return
+      }
       setBillAppt(null)
       await (view === 'day' ? loadDay() : load())
     } finally {
@@ -960,7 +994,11 @@ export default function Appointments() {
   }
 
   async function quickNoShow(id: string) {
-    await supabase.from('appointments').update({ status: 'no_show' }).eq('id', id)
+    const { error } = await supabase.from('appointments').update({ status: 'no_show' }).eq('id', id)
+    if (error) {
+      alert(t(`Update failed: ${error.message}`, `Error al actualizar: ${error.message}`))
+      return
+    }
     await (view === 'day' ? loadDay() : load())
   }
 
@@ -1042,7 +1080,11 @@ export default function Appointments() {
     if (!confirmDelBlock) return
     setDeletingBlock(true)
     try {
-      await supabase.from('time_blocks').delete().eq('id', confirmDelBlock.id)
+      const { error } = await supabase.from('time_blocks').delete().eq('id', confirmDelBlock.id)
+      if (error) {
+        alert(t(`Delete failed: ${error.message}`, `Error al eliminar: ${error.message}`))
+        return
+      }
       setConfirmDelBlock(null)
       await loadDayBlocks()
     } finally {

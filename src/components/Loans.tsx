@@ -106,22 +106,35 @@ export default function Loans({ clientId }: { clientId: string }) {
     // One-time seed: Galeano-Molina personal loan (Pevez LLC as lender)
     const SEED_KEY = 'sandalo_seeded_pevez_loan_v2'
     if (typeof window !== 'undefined' && !localStorage.getItem(SEED_KEY)) {
-      await supabase.from('loans').insert({
-        client_id: clientId,
-        name: 'Pevez LLC — $50k Note',
-        lender: 'Pevez LLC',
-        instrument_type: 'flat_fee',
-        loan_type: 'interest_only',
-        original_principal: 50000,
-        total_fee: 30000,
-        start_date: '2023-10-05',
-        term_months: 24,
-        payment_frequency: 'monthly',
-        payment_amount: 1250,
-        notes:
-          'Lender: Pevez LLC (974 Bennington St, Boston MA 02128). Borrower: Alejandro Galeano-Molina (52 Bennington St, Revere MA 02151). Interest-only $1,250/mo (2.5%/mo on $50k). Pre-computed $30,000 fixed finance charge under Rule of 78 — fee largely owed regardless of payoff timing. $50,000 balloon principal due Oct 2025 (past due as of recording). Note: lender signature line blank on original agreement. Signed 10/4/2023.',
-      })
-      localStorage.setItem(SEED_KEY, '1')
+      // localStorage is per-browser — check the DB too, or every new device
+      // inserts another $50k loan and doubles Total Outstanding
+      const { data: existingPevez } = await supabase
+        .from('loans')
+        .select('id')
+        .eq('client_id', clientId)
+        .eq('lender', 'Pevez LLC')
+        .limit(1)
+      if ((existingPevez ?? []).length > 0) {
+        localStorage.setItem(SEED_KEY, '1')
+      } else {
+        const { error: seedErr } = await supabase.from('loans').insert({
+          client_id: clientId,
+          name: 'Pevez LLC — $50k Note',
+          lender: 'Pevez LLC',
+          instrument_type: 'flat_fee',
+          loan_type: 'interest_only',
+          original_principal: 50000,
+          total_fee: 30000,
+          start_date: '2023-10-05',
+          term_months: 24,
+          payment_frequency: 'monthly',
+          payment_amount: 1250,
+          notes:
+            'Lender: Pevez LLC (974 Bennington St, Boston MA 02128). Borrower: Alejandro Galeano-Molina (52 Bennington St, Revere MA 02151). Interest-only $1,250/mo (2.5%/mo on $50k). Pre-computed $30,000 fixed finance charge under Rule of 78 — fee largely owed regardless of payoff timing. $50,000 balloon principal due Oct 2025 (past due as of recording). Note: lender signature line blank on original agreement. Signed 10/4/2023.',
+        })
+        // Only mark seeded on verified success so a failed insert retries next load
+        if (!seedErr) localStorage.setItem(SEED_KEY, '1')
+      }
     }
 
     const { data: loanRows, error: e1 } = await supabase
@@ -330,26 +343,39 @@ export default function Loans({ clientId }: { clientId: string }) {
 
     let loanId = form.id ?? ''
     if (form.id) {
-      await supabase.from('loans').update(row).eq('id', form.id)
+      const { error } = await supabase.from('loans').update(row).eq('id', form.id)
+      if (error) {
+        setFormErr(error.message)
+        setSaving(false)
+        return
+      }
     } else {
-      const { data: inserted } = await supabase.from('loans').insert(row).select('id').single()
-      loanId = inserted?.id ?? ''
+      const { data: inserted, error } = await supabase.from('loans').insert(row).select('id').single()
+      if (error || !inserted?.id) {
+        setFormErr(error?.message ?? 'Could not save the loan.')
+        setSaving(false)
+        return
+      }
+      loanId = inserted.id
     }
 
-    // Handle chart-of-accounts linking
+    // Handle chart-of-accounts linking — the loan itself is saved by now, so a
+    // linking failure is surfaced without closing the modal (retry is idempotent)
+    let linkErr: string | null = null
     if (loanId && form.linked_account_id) {
       // User chose an existing account — link it and unlink any previously linked different account
-      await supabase
+      const { error: unlinkE } = await supabase
         .from('categories')
         .update({ loan_id: null })
         .eq('loan_id', loanId)
         .eq('client_id', clientId)
         .neq('id', form.linked_account_id)
-      await supabase
+      const { error: linkE } = await supabase
         .from('categories')
         .update({ loan_id: loanId })
         .eq('id', form.linked_account_id)
         .eq('client_id', clientId)
+      linkErr = unlinkE?.message ?? linkE?.message ?? null
     } else if (loanId) {
       // Auto-create / update the linked liability account in chart of accounts
       const section = (showScheduleFields ? t : 0) > 12 ? 'Non-Current Liabilities' : 'Current Liabilities'
@@ -364,7 +390,11 @@ export default function Loans({ clientId }: { clientId: string }) {
         .maybeSingle()
 
       if (existingLinked) {
-        await supabase.from('categories').update({ name: acctName, pl_section: section }).eq('id', existingLinked.id)
+        const { error: updE } = await supabase
+          .from('categories')
+          .update({ name: acctName, pl_section: section })
+          .eq('id', existingLinked.id)
+        linkErr = updE?.message ?? null
       } else {
         // Check if a category with this name already exists (to avoid unique conflict)
         const { data: nameMatch } = await supabase
@@ -375,7 +405,11 @@ export default function Loans({ clientId }: { clientId: string }) {
           .maybeSingle()
 
         if (nameMatch) {
-          await supabase.from('categories').update({ loan_id: loanId, pl_section: section }).eq('id', nameMatch.id)
+          const { error: updE } = await supabase
+            .from('categories')
+            .update({ loan_id: loanId, pl_section: section })
+            .eq('id', nameMatch.id)
+          linkErr = updE?.message ?? null
         } else {
           const { data: liabCats } = await supabase
             .from('categories')
@@ -386,26 +420,37 @@ export default function Loans({ clientId }: { clientId: string }) {
             (m: number, c: { sort_order: number }) => Math.max(m, c.sort_order || 0),
             0,
           )
-          await supabase.from('categories').insert({
+          const { error: insE } = await supabase.from('categories').insert({
             client_id: clientId,
             name: acctName,
             sort_order: maxOrder + 10,
             pl_section: section,
             loan_id: loanId,
           })
+          linkErr = insE?.message ?? null
         }
       }
     }
 
     setSaving(false)
+    if (linkErr) {
+      setFormErr(`Loan saved, but account linking failed: ${linkErr}`)
+      load()
+      return
+    }
     setModal(false)
     load()
   }
 
   async function deleteLoan(id: string) {
     if (!confirm('Delete this debt record and all its payment records?')) return
-    await supabase.from('loan_payments').delete().eq('loan_id', id)
-    await supabase.from('loans').delete().eq('id', id)
+    // loan_payments cascades via FK — a manual pre-delete would open a window
+    // where payment history is destroyed but the loan survives
+    const { error } = await supabase.from('loans').delete().eq('id', id)
+    if (error) {
+      alert(`Delete failed: ${error.message}`)
+      return
+    }
     // categories.loan_id is set to NULL by FK ON DELETE SET NULL — account stays in COA
     load()
   }

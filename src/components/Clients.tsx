@@ -195,6 +195,7 @@ export default function Clients() {
   const [fieldErr, setFieldErr] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState<Customer | null>(null)
   const searchRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const loadSeqRef = useRef(0)
 
   const loadFieldDefs = useCallback(async () => {
     const { data } = await supabase
@@ -207,6 +208,8 @@ export default function Clients() {
   }, [])
 
   const load = useCallback(async (q: string, activeFilt: boolean, pg: number) => {
+    // A slower, older response must not clobber the results of a newer search
+    const seq = ++loadSeqRef.current
     setLoading(true)
     let query = supabase
       .from('customers')
@@ -224,6 +227,7 @@ export default function Clients() {
       )
     }
     const { data, count } = await query
+    if (seq !== loadSeqRef.current) return
     setCustomers((data ?? []) as Customer[])
     setTotal(count ?? 0)
     setLoading(false)
@@ -336,7 +340,15 @@ export default function Clients() {
   }
 
   async function deleteCustomer(c: Customer) {
-    await supabase.from('customers').delete().eq('id', c.id)
+    const { error } = await supabase.from('customers').delete().eq('id', c.id)
+    if (error) {
+      alert(
+        error.code === '23503'
+          ? `${c.first_name} ${c.last_name} has appointment history and cannot be deleted. Mark them Inactive instead.`
+          : `Delete failed: ${error.message}`,
+      )
+      return
+    }
     setDeleteConfirm(null)
     load(search, activeOnly, page)
   }
@@ -404,7 +416,11 @@ export default function Clients() {
   }
 
   async function removeField(f: FieldDef) {
-    await supabase.from('customer_field_defs').update({ is_active: false }).eq('id', f.id)
+    const { error } = await supabase.from('customer_field_defs').update({ is_active: false }).eq('id', f.id)
+    if (error) {
+      alert(`Could not remove field: ${error.message}`)
+      return
+    }
     loadFieldDefs()
   }
 

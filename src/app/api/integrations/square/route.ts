@@ -73,7 +73,9 @@ export async function GET() {
 // POST — connect: validate a pasted token, then store it
 export async function POST(request: Request) {
   if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const { environment, access_token, location_id } = await request.json()
+  const body = await request.json().catch(() => null)
+  if (!body || typeof body !== 'object') return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  const { environment, access_token, location_id } = body
 
   if (!['sandbox', 'production'].includes(environment))
     return NextResponse.json({ error: 'Invalid environment' }, { status: 400 })
@@ -136,7 +138,9 @@ export async function POST(request: Request) {
 // PATCH — change the selected location without re-entering the token
 export async function PATCH(request: Request) {
   if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const { location_id } = await request.json()
+  const body = await request.json().catch(() => null)
+  if (!body || typeof body !== 'object') return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  const { location_id } = body
   const db = adminClient()
   const { data: row } = await db.from('square_connections').select('*').eq('client_id', CLIENT_ID).maybeSingle()
   if (!row) return NextResponse.json({ error: 'Not connected' }, { status: 400 })
@@ -146,12 +150,13 @@ export async function PATCH(request: Request) {
   const chosen = locations.find(l => l.id === location_id)
   if (!chosen) return NextResponse.json({ error: 'Location not found' }, { status: 400 })
 
-  const { data: updated } = await db
+  const { data: updated, error: updateErr } = await db
     .from('square_connections')
     .update({ location_id: chosen.id, location_name: chosen.name })
     .eq('client_id', CLIENT_ID)
     .select('*')
     .single()
+  if (updateErr) return NextResponse.json({ error: updateErr.message }, { status: 400 })
   return NextResponse.json(publicShape(updated, { locations: locations.map(l => ({ id: l.id, name: l.name })) }))
 }
 
@@ -159,6 +164,8 @@ export async function PATCH(request: Request) {
 export async function DELETE() {
   if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const db = adminClient()
-  await db.from('square_connections').delete().eq('client_id', CLIENT_ID)
+  const { error } = await db.from('square_connections').delete().eq('client_id', CLIENT_ID)
+  // Never report "disconnected" while the live token is still stored
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 })
   return NextResponse.json({ connected: false })
 }

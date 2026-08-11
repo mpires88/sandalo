@@ -282,20 +282,36 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
     }
     setLoan(loanRows[0])
 
-    const { data: payRows } = await supabase
+    // A failed fetch must not render as "no payments" — the import buttons use
+    // these lists to decide what's already recorded, so an empty-on-error list
+    // would let a re-import duplicate every payment. Balance math needs every
+    // row, so cap explicitly (PostgREST truncates at 1000 by default).
+    const { data: payRows, error: payFetchErr } = await supabase
       .from('loan_payments')
       .select('*')
       .eq('loan_id', loanId)
       .eq('client_id', clientId)
       .order('payment_date')
+      .limit(10000)
+    if (payFetchErr) {
+      setError(`Failed to load payments: ${payFetchErr.message}`)
+      setLoading(false)
+      return
+    }
     setPayments(payRows ?? [])
 
-    const { data: disbRows } = await supabase
+    const { data: disbRows, error: disbFetchErr } = await supabase
       .from('loan_disbursements')
       .select('*')
       .eq('loan_id', loanId)
       .eq('client_id', clientId)
       .order('disbursement_date')
+      .limit(10000)
+    if (disbFetchErr) {
+      setError(`Failed to load disbursements: ${disbFetchErr.message}`)
+      setLoading(false)
+      return
+    }
     setDisbursements(disbRows ?? [])
 
     // Load bank transactions linked to recorded payments and disbursements
@@ -528,22 +544,29 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
       transaction_id: payForm.transaction_id || undefined,
     }
 
-    if (editPayment) {
-      await supabase
-        .from('loan_payments')
-        .update(row as Record<string, unknown>)
-        .eq('id', editPayment.id)
-    } else {
-      await supabase.from('loan_payments').insert(row as Record<string, unknown>)
-    }
+    const { error: payWriteErr } = editPayment
+      ? await supabase
+          .from('loan_payments')
+          .update(row as Record<string, unknown>)
+          .eq('id', editPayment.id)
+      : await supabase.from('loan_payments').insert(row as Record<string, unknown>)
     setSaving(false)
+    if (payWriteErr) {
+      // Money write — keep the modal open instead of pretending it saved
+      setPayErr(payWriteErr.message)
+      return
+    }
     setPayModal(false)
     load()
   }
 
   async function deletePayment(id: string) {
     if (!confirm('Delete this payment record?')) return
-    await supabase.from('loan_payments').delete().eq('id', id)
+    const { error } = await supabase.from('loan_payments').delete().eq('id', id)
+    if (error) {
+      alert(`Delete failed: ${error.message}`)
+      return
+    }
     load()
   }
 
@@ -587,22 +610,28 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
       notes: disbForm.notes.trim() || undefined,
       transaction_id: disbForm.transaction_id || undefined,
     }
-    if (editDisb) {
-      await supabase
-        .from('loan_disbursements')
-        .update(row as Record<string, unknown>)
-        .eq('id', editDisb.id)
-    } else {
-      await supabase.from('loan_disbursements').insert(row as Record<string, unknown>)
-    }
+    const { error: disbWriteErr } = editDisb
+      ? await supabase
+          .from('loan_disbursements')
+          .update(row as Record<string, unknown>)
+          .eq('id', editDisb.id)
+      : await supabase.from('loan_disbursements').insert(row as Record<string, unknown>)
     setSaving(false)
+    if (disbWriteErr) {
+      setDisbErr(disbWriteErr.message)
+      return
+    }
     setDisbModal(false)
     load()
   }
 
   async function deleteDisbursement(id: string) {
     if (!confirm('Delete this disbursement record?')) return
-    await supabase.from('loan_disbursements').delete().eq('id', id)
+    const { error } = await supabase.from('loan_disbursements').delete().eq('id', id)
+    if (error) {
+      alert(`Delete failed: ${error.message}`)
+      return
+    }
     load()
   }
 
@@ -628,18 +657,21 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
 
     setSaving(true)
     try {
+      // supabase-js returns { error } rather than throwing — collect failures
+      // explicitly or a mid-loop failure reads as a successful import
+      const failures: string[] = []
       for (const t of toImport) {
-        await supabase.from('loan_disbursements').insert({
+        const { error } = await supabase.from('loan_disbursements').insert({
           client_id: clientId,
           loan_id: loanId,
           transaction_id: t.id,
           disbursement_date: t.transaction_date,
           amount: Math.abs(Number(t.amount)),
         })
+        if (error) failures.push(`${t.transaction_date}: ${error.message}`)
       }
+      if (failures.length) alert(`${failures.length} draw(s) failed to import:\n${failures.join('\n')}`)
       await load()
-    } catch (e) {
-      alert('Import failed: ' + String(e))
     } finally {
       setSaving(false)
     }
@@ -667,6 +699,9 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
 
     setSaving(true)
     try {
+      // supabase-js returns { error } rather than throwing — collect failures
+      // explicitly or a mid-loop failure reads as a successful import
+      const failures: string[] = []
       const useSchedule = hasFixedSchedule(loan.instrument_type ?? 'term_loan')
       let nextPeriod = currentPeriodIdx // first unmatched schedule row
 
@@ -684,7 +719,7 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
           nextPeriod++
         }
 
-        await supabase.from('loan_payments').insert({
+        const { error } = await supabase.from('loan_payments').insert({
           client_id: clientId,
           loan_id: loanId,
           transaction_id: t.id,
@@ -694,10 +729,10 @@ export default function LoanDetail({ clientId, loanId }: { clientId: string; loa
           interest_amount: interest,
           fees_amount: 0,
         })
+        if (error) failures.push(`${t.transaction_date}: ${error.message}`)
       }
+      if (failures.length) alert(`${failures.length} payment(s) failed to import:\n${failures.join('\n')}`)
       await load()
-    } catch (e) {
-      alert('Import failed: ' + String(e))
     } finally {
       setSaving(false)
     }

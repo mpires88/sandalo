@@ -122,8 +122,14 @@ async function deterministicUUID(
   date: string,
   amount: number,
   description: string,
+  occurrence: number,
 ): Promise<string> {
-  const input = `${bankAccount}|${date}|${amount}|${description}`
+  // The 1st occurrence hashes without a suffix so ids keep matching rows imported
+  // before occurrence numbering existed; repeats get distinct ids via the suffix
+  const input =
+    occurrence > 1
+      ? `${bankAccount}|${date}|${amount}|${description}|${occurrence}`
+      : `${bankAccount}|${date}|${amount}|${description}`
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
   const b = new Uint8Array(buf).slice(0, 16)
   b[6] = (b[6] & 0x0f) | 0x40 // version 4
@@ -1344,7 +1350,12 @@ export default function Transactions({ clientId }: { clientId: string }) {
             setShowImport(false)
             load()
           }}
-          onClose={() => setShowImport(false)}
+          onClose={() => {
+            setShowImport(false)
+            // Rows upload during the preview step — closing early must still
+            // refresh the table or it shows pre-import data
+            load()
+          }}
         />
       )}
     </div>
@@ -1502,9 +1513,11 @@ function ImportModal({ clientId, existingTxns, onDone, onClose }: ImportModalPro
     setMapError('')
     saveBankMapping(sourceAccountId, cfg)
 
-    // Parse all rows and generate deterministic UUIDs in parallel
-    const settled = await Promise.all(
-      csv!.rows.map(async (raw, i) => {
+    // Parse all rows synchronously first so repeated identical rows can be
+    // numbered in file order before hashing
+    type ParsedFields = { date: string; desc: string; amount: number; raw: Record<string, string> }
+    const parseResults: Array<{ error: { line: number; msg: string } } | { p: ParsedFields }> = csv!.rows.map(
+      (raw, i) => {
         const line = i + 2
         const rawDate = raw[cols.transaction_date] || ''
         const date = parseDate(rawDate, dateFormat)
@@ -1532,23 +1545,40 @@ function ImportModal({ clientId, existingTxns, onDone, onClose }: ImportModalPro
             else if (ind === 'credit' || ind === 'cr') amount = Math.abs(amount)
           }
         }
-        const id = await deterministicUUID(sourceAccountId, date, amount, rawDesc)
-        return {
-          row: {
-            id,
-            transaction_date: date,
-            description: rawDesc,
-            amount,
-            source_account_id: sourceAccountId,
-            ...(cols.reference_id && raw[cols.reference_id] ? { reference_id: raw[cols.reference_id].trim() } : {}),
-            ...(cols.category && raw[cols.category] ? { category: raw[cols.category].trim() } : {}),
-            ...(clientId !== null ? { client_id: clientId } : {}),
-          } as ParsedRow,
-        }
-      }),
+        return { p: { date, desc: rawDesc, amount, raw } }
+      },
     )
-    const errors = settled.filter(r => 'error' in r).map(r => (r as { error: { line: number; msg: string } }).error)
-    const rows = settled.filter(r => 'row' in r).map(r => (r as { row: ParsedRow }).row)
+    const errors = parseResults
+      .filter(r => 'error' in r)
+      .map(r => (r as { error: { line: number; msg: string } }).error)
+
+    // Two genuinely identical rows in one file are both real charges — number each
+    // repeat so it gets its own deterministic id instead of collapsing into one
+    const occurrenceOf = new Map<string, number>()
+    const rows = await Promise.all(
+      parseResults
+        .filter(r => 'p' in r)
+        .map(r => {
+          const p = (r as { p: ParsedFields }).p
+          const fp = `${p.date}|${p.amount}|${p.desc}`
+          const occurrence = (occurrenceOf.get(fp) ?? 0) + 1
+          occurrenceOf.set(fp, occurrence)
+          return { ...p, occurrence }
+        })
+        .map(async p => {
+          const id = await deterministicUUID(sourceAccountId, p.date, p.amount, p.desc, p.occurrence)
+          return {
+            id,
+            transaction_date: p.date,
+            description: p.desc,
+            amount: p.amount,
+            source_account_id: sourceAccountId,
+            ...(cols.reference_id && p.raw[cols.reference_id] ? { reference_id: p.raw[cols.reference_id].trim() } : {}),
+            ...(cols.category && p.raw[cols.category] ? { category: p.raw[cols.category].trim() } : {}),
+            ...(clientId !== null ? { client_id: clientId } : {}),
+          } as ParsedRow
+        }),
+    )
     setParsed(rows)
     setParseErrs(errors)
     setStep('categorize')
@@ -1604,13 +1634,19 @@ function ImportModal({ clientId, existingTxns, onDone, onClose }: ImportModalPro
         if (cancelled) return
 
         const insertedIds = new Set<string>()
-        uploadResults.forEach(({ data, error }) => {
-          if (error) return
+        const failedIds = new Set<string>()
+        uploadResults.forEach(({ data, error }, bi) => {
+          if (error) {
+            // A failed batch's rows are failures, not duplicates — counting them
+            // as "skipped" would report rows as imported-already when they aren't
+            for (const r of uploadBatches[bi]) failedIds.add(r.id!)
+            return
+          }
           data?.forEach(r => insertedIds.add(r.id))
         })
 
         const newRows = uniqueParsed.filter(r => insertedIds.has(r.id!))
-        const dupes = [...withinCsvDupes, ...uniqueParsed.filter(r => !insertedIds.has(r.id!))]
+        const dupes = [...withinCsvDupes, ...uniqueParsed.filter(r => !insertedIds.has(r.id!) && !failedIds.has(r.id!))]
 
         const errs = uploadResults.filter(r => r.error).map(r => r.error!.message)
         if (!cancelled) {

@@ -32,7 +32,9 @@ export async function POST(request: Request) {
   const caller = await requireAdmin()
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { email, name, role, password, staff_id } = await request.json()
+  const body = await request.json().catch(() => null)
+  if (!body || typeof body !== 'object') return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  const { email, name, role, password, staff_id } = body
   if (!email || !name || !password)
     return NextResponse.json({ error: 'email, name, and password are required' }, { status: 400 })
   if (!ASSIGNABLE_ROLES.includes(role)) return NextResponse.json({ error: 'Invalid role' }, { status: 400 })
@@ -79,8 +81,16 @@ export async function PATCH(request: Request) {
   const caller = await requireAdmin()
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { id, role, is_active, name, staff_id } = await request.json()
-  if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
+  const body = await request.json().catch(() => null)
+  if (!body || typeof body !== 'object') return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  const { id, role, is_active, name, staff_id } = body
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  if (typeof id !== 'string' || !UUID_RE.test(id))
+    return NextResponse.json({ error: 'id is required' }, { status: 400 })
+  if (name !== undefined && typeof name !== 'string')
+    return NextResponse.json({ error: 'name must be a string' }, { status: 400 })
+  if (staff_id !== undefined && staff_id !== null && !(typeof staff_id === 'string' && UUID_RE.test(staff_id)))
+    return NextResponse.json({ error: 'staff_id must be a UUID or null' }, { status: 400 })
 
   const admin = adminClient()
 

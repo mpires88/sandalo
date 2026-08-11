@@ -222,11 +222,16 @@ export default function Staff() {
         }
         const existing = staff.find(m => m.id === form.id)
         if (existing && existing.name !== payload.name) {
-          await supabase
+          // The payroll category must follow the rename or P&L rollups diverge
+          const { error: catErr } = await supabase
             .from('categories')
             .update({ name: payload.name })
             .eq('staff_id', form.id)
             .eq('client_id', CLIENT_ID)
+          if (catErr) {
+            setFormErr(`Saved, but the payroll category rename failed: ${catErr.message}`)
+            return
+          }
         }
       } else {
         const { data: created, error: err } = await supabase
@@ -246,7 +251,7 @@ export default function Staff() {
             .order('sort_order', { ascending: false })
             .limit(1)
             .single()
-          await supabase.from('categories').insert({
+          const { error: catErr } = await supabase.from('categories').insert({
             client_id: CLIENT_ID,
             name: payload.name,
             sort_order: (maxData?.sort_order ?? 0) + 10,
@@ -254,6 +259,10 @@ export default function Staff() {
             parent: 'Therapist Compensation',
             staff_id: created.id,
           })
+          if (catErr) {
+            setFormErr(`Staff member created, but their payroll category failed: ${catErr.message}`)
+            return
+          }
         }
       }
 
@@ -279,10 +288,12 @@ export default function Staff() {
         notes: licForm.notes.trim() || null,
         status: isExpired ? 'expired' : 'active',
       }
-      if (editingLicId) {
-        await supabase.from('staff_licenses').update(payload).eq('id', editingLicId)
-      } else {
-        await supabase.from('staff_licenses').insert(payload)
+      const { error: licErr } = editingLicId
+        ? await supabase.from('staff_licenses').update(payload).eq('id', editingLicId)
+        : await supabase.from('staff_licenses').insert(payload)
+      if (licErr) {
+        alert(`License not saved: ${licErr.message}`)
+        return
       }
       setLicForm({ ...BLANK_LICENSE })
       setEditingLicId(null)
@@ -293,14 +304,27 @@ export default function Staff() {
   }
 
   async function deleteLicense(licId: string) {
-    await supabase.from('staff_licenses').delete().eq('id', licId)
+    const { error } = await supabase.from('staff_licenses').delete().eq('id', licId)
+    if (error) {
+      alert(`Delete failed: ${error.message}`)
+      return
+    }
     await load()
   }
 
   async function removeStaff(id: string) {
     setDeleting(id)
     try {
-      await supabase.from('staff').delete().eq('id', id)
+      const { error } = await supabase.from('staff').delete().eq('id', id)
+      if (error) {
+        // Likely FK-protected (has appointments) — don't drop them from the list
+        alert(
+          error.code === '23503'
+            ? 'This staff member has appointment history and cannot be deleted. Set them to Inactive instead.'
+            : `Delete failed: ${error.message}`,
+        )
+        return
+      }
       setStaff(prev => prev.filter(m => m.id !== id))
     } finally {
       setDeleting(null)
